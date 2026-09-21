@@ -3,7 +3,6 @@
   <name>pylon_demo_mun_rover</name><version>0.1.0</version>
   <description>Sensor-only Mun rover navigation demo.</description>
   <maintainer email="user@example.com">PyLoN</maintainer><license>MIT</license>
-  <buildtool_depend>ament_python</buildtool_depend>
   <exec_depend>pylon_perception</exec_depend>
   <exec_depend>rclpy</exec_depend><exec_depend>python3-numpy</exec_depend><exec_depend>python3-scipy</exec_depend>
   <exec_depend>pylon_vehicle_control</exec_depend>

@@ -3,7 +3,6 @@
   <name>pylon_demo_reusable</name><version>0.1.0</version>
   <description>Satellite deployment and powered recovery with managed ROS lifecycle.</description>
   <maintainer email="user@example.com">PyLoN</maintainer><license>MIT</license>
-  <buildtool_depend>ament_python</buildtool_depend>
   <exec_depend>rclpy</exec_depend><exec_depend>lifecycle_msgs</exec_depend>
   <exec_depend>std_msgs</exec_depend><exec_depend>std_srvs</exec_depend>
   <exec_depend>diagnostic_msgs</exec_depend><exec_depend>pylon_interfaces</exec_depend>

@@ -6,7 +6,6 @@
   <maintainer email="user@example.com">PyLoN</maintainer>
   <license>MIT</license>
 
-  <buildtool_depend>ament_python</buildtool_depend>
   <exec_depend>pylon_perception</exec_depend>
 
   <exec_depend>ament_index_python</exec_depend>
