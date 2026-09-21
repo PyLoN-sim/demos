@@ -29,19 +29,29 @@ class Geometry:
             if not np.isfinite([w.x,w.y,w.z,w.radius,w.rolling_sign,w.steering_sign,w.max_angle]).all():
                 raise ValueError('non-finite wheel geometry')
             if w.radius <= 0 or abs(w.rolling_sign) != 1 or abs(w.steering_sign) != 1:
-                raise ValueError('missing geometry or wheel axes not aligned with base_link')
+                raise ValueError('select a Forward rover control point: wheel axes must align with base_link')
             partners = [v for v in wheels if v.id != w.id and abs(v.x-w.x)<0.25 and abs(v.y+w.y)<0.25]
             if len(partners) != 1 or partners[0].steering != w.steering or abs(w.y)<0.1:
                 raise ValueError('wheels must form symmetric left/right pairs')
-        front = [w for w in wheels if w.steering]
+        steered = [w for w in wheels if w.steering]
         fixed = [w for w in wheels if not w.steering]
-        if len(front)!=2 or not fixed or min(w.x for w in front) <= max(w.x for w in fixed)+0.1:
-            raise ValueError('enable steering only on the front pair')
-        if min(w.max_angle for w in front) < 0.05:
-            raise ValueError('front steering angle unavailable')
-        self.rear_x = float(np.mean([w.x for w in fixed]))
-        self.wheelbase = float(np.mean([w.x for w in front])) - self.rear_x
-        self.min_radius = max((w.x-self.rear_x)/math.tan(min(w.max_angle, 1.2))+abs(w.y) for w in front)
+        front_x, back_x = max(w.x for w in wheels), min(w.x for w in wheels)
+        if front_x-back_x<0.5 or not steered or min(w.max_angle for w in steered)<0.05:
+            raise ValueError('wheelbase or steering angle unavailable')
+        if len(steered)==2 and fixed and min(w.x for w in steered)>max(w.x for w in fixed)+0.1:
+            self.steering_mode='front'
+            self.rear_x=float(np.mean([w.x for w in fixed]))
+        elif all(w.steering for w in wheels if abs(w.x-front_x)<.25 or abs(w.x-back_x)<.25):
+            self.steering_mode='counter_phase'
+            # The navigation origin has zero lateral velocity. Rear wheels
+            # counter-steer about the axle midpoint; a fixed middle pair is OK.
+            self.rear_x=(front_x+back_x)/2
+            if any(abs(w.x-self.rear_x)>.25 for w in fixed):
+                raise ValueError('fixed wheels must lie on the center axle for counter steering')
+        else:
+            raise ValueError('enable front-pair steering or symmetric front/rear steering')
+        self.wheelbase=front_x-back_x
+        self.min_radius=max(abs(w.x-self.rear_x)/math.tan(min(w.max_angle,1.2))+abs(w.y) for w in steered)
         lo, hi = np.asarray(body_min, float).copy(), np.asarray(body_max, float).copy()
         if not np.isfinite([lo,hi]).all() or np.any(hi<=lo):
             raise ValueError('body collision bounds unavailable')
@@ -64,8 +74,10 @@ class Geometry:
         return result
 
     def speed(self, states, yaw_rate):
-        values = [states[w.id][0]*w.radius*w.rolling_sign+yaw_rate*w.y
-                  for w in self.wheels if not w.steering]
+        # Project each measured wheel speed using its measured steering angle,
+        # then remove the yaw contribution. This also works without fixed wheels.
+        values = [states[w.id][0]*w.radius*w.rolling_sign*math.cos(states[w.id][2])+yaw_rate*w.y
+                  for w in self.wheels]
         return float(np.median(values)), float(np.std(values))
 
 

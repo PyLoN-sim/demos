@@ -13,7 +13,10 @@ def generate_launch_description():
     servers=[('nav2_controller','controller_server'),('nav2_planner','planner_server'),('nav2_bt_navigator','bt_navigator')]
     nodes=[DeclareLaunchArgument('params_file',default_value=os.path.join(share,'config','nav2.yaml')),
            DeclareLaunchArgument('bt_xml',default_value=os.path.join(share,'config','navigate.xml')),
-           DeclareLaunchArgument('lidar_sensor_id',default_value='front_lidar'),
+           DeclareLaunchArgument('lidar_sensor_id',default_value='auto'),
+           DeclareLaunchArgument('camera_sensor_id',default_value='auto'),
+           DeclareLaunchArgument('show_visualization',default_value='true'),
+           DeclareLaunchArgument('show_camera',default_value='false'),
            DeclareLaunchArgument('use_rviz',default_value='true'),
            DeclareLaunchArgument('start_bridge',default_value='true'),
            DeclareLaunchArgument('evaluate',default_value='false')]
@@ -27,6 +30,14 @@ def generate_launch_description():
         nodes.append(Node(package='pylon_bridge',executable='udp_bridge',arguments=args,condition=condition,output='screen'))
     nodes.append(Node(package='pylon_demo_mun_rover',executable='rover_node',output='screen',
         parameters=[{'lidar_sensor_id':LaunchConfiguration('lidar_sensor_id')}]))
+    nodes.append(Node(package='pylon_demo_mun_rover',executable='visualization',output='screen',
+        condition=IfCondition(LaunchConfiguration('show_visualization')),
+        parameters=[{'camera_sensor_id':LaunchConfiguration('camera_sensor_id')}]))
+    # The standalone image viewer avoids the RViz Image dock's Qt/Ogre crash
+    # on some HiDPI desktops. The photo map itself is displayed inside RViz.
+    nodes.append(Node(package='rqt_image_view',executable='rqt_image_view',
+        arguments=['/pylon/mun_rover/camera/image_raw'],
+        condition=IfCondition(LaunchConfiguration('show_camera')),output='screen'))
     for package,executable in servers:
         overrides={'use_sim_time':False}
         if executable=='bt_navigator': overrides['default_nav_to_pose_bt_xml']=LaunchConfiguration('bt_xml')
@@ -36,5 +47,8 @@ def generate_launch_description():
         parameters=[{'autostart':True,'node_names':[e for _,e in servers]}],output='screen'))
     nodes.append(Node(package='pylon_demo_mun_rover',executable='evaluate',condition=IfCondition(LaunchConfiguration('evaluate')),output='screen'))
     nodes.append(Node(package='rviz2',executable='rviz2',arguments=['-d',os.path.join(share,'rviz','mun_rover.rviz')],
+        remappings=[('/lifecycle_manager_navigation/'+service,
+                     '/pylon/mun_rover/lifecycle_manager_navigation/'+service)
+                    for service in ('manage_nodes','is_active')],
         condition=IfCondition(LaunchConfiguration('use_rviz')),output='screen'))
     return LaunchDescription(nodes)

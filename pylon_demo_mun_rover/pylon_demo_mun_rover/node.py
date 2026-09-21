@@ -1,5 +1,7 @@
 """Sensor-only rover runtime and guarded public NavigateToPose action."""
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+from array import array
 import json
 import math
 import time
@@ -26,6 +28,8 @@ from sensor_msgs.msg import Imu, PointCloud2
 from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Header, String
 from std_srvs.srv import Trigger
+from lifecycle_msgs.srv import GetState
+from lifecycle_msgs.msg import State
 from visualization_msgs.msg import Marker
 from tf2_ros import Buffer, TransformListener, TransformBroadcaster, StaticTransformBroadcaster, TransformException
 from pylon_interfaces.msg import WheelState, WheelCommand, ControlAuthorityState, ControlAuthorityCommand, VesselLifecycle
@@ -52,7 +56,9 @@ class Rover(Node):
         super().__init__('pylon_mun_rover')
         self.lock=threading.RLock(); self.reset_serial=0
         self.cloud_group=MutuallyExclusiveCallbackGroup()
-        self.declare_parameter('lidar_sensor_id','front_lidar')
+        self.map_worker=ThreadPoolExecutor(max_workers=1,thread_name_prefix='rover_terrain')
+        self.map_future=None
+        self.declare_parameter('lidar_sensor_id','auto')
         self.declare_parameter('lidar_topic','')
         self.declare_parameter('position_sigma_limit',0.6)
         self.declare_parameter('footprint_margin',0.5)
@@ -82,31 +88,64 @@ class Rover(Node):
         self.create_service(Trigger,'/pylon/mun_rover/reset',self.reset_service)
         self.create_subscription(VesselLifecycle,'/ksp_vessel/lifecycle',self.lifecycle,self.qos)
         self.create_subscription(ControlAuthorityState,'/ksp_vessel/control/authority/state',self.authority,self.qos)
-        self.create_subscription(WheelState,'/ksp_vessel/actuators/wheel/state',self.wheel,qos_profile_sensor_data)
+        # All wheels share this topic. Keep complete bursts while the executor
+        # services other sensors, rather than only five individual wheels.
+        self.create_subscription(WheelState,'/ksp_vessel/actuators/wheel/state',self.wheel,
+            QoSProfile(depth=64,reliability=ReliabilityPolicy.BEST_EFFORT))
         self.create_subscription(Imu,'/ksp_vessel/imu/data_raw',self.imu,qos_profile_sensor_data)
-        topic=self.get_parameter('lidar_topic').value or '/ksp_vessel/lidar_3d/'+self.get_parameter('lidar_sensor_id').value+'/points'
-        self.create_subscription(PointCloud2,topic,self.cloud,QoSProfile(depth=1,reliability=ReliabilityPolicy.BEST_EFFORT),callback_group=self.cloud_group)
+        self.lidar_subscription=None; self.lidar_topic=''; self.lidar_selection_reason='waiting_for_lidar'
         self.create_subscription(Twist,'/pylon/mun_rover/cmd_vel',self.command,10)
         self.param_client=AsyncParameterClient(self,'/pylon/mun_rover/planner_server',callback_group=self.group)
+        self.planner_state_client=self.create_client(GetState,'/pylon/mun_rover/planner_server/get_state',callback_group=self.group)
+        self.goal_param_client=AsyncParameterClient(self,'/pylon/mun_rover/controller_server',callback_group=self.group)
         self.sequence=0; self.epoch=None; self.vessel_id=''; self.vessel_active=False
         self.lease=LeaseCoordinator('pylon_mun_rover',0.4)
         self.active_goal=None; self.goal_pending=False; self.child_goal=None; self.fault=''; self.command_time=0.
         self.started_at=0.; self.target=(0.,0.); self.sent_speed=0.; self.last_tick=time.monotonic()
         self.reset_state()
+        self.select_lidar()
+        self.create_timer(1.,self.select_lidar)
         self.create_timer(0.05,self.tick)
         self.create_timer(1.,self.report)
         self.get_logger().info('Waiting for all wheel geometry, stationary Mun IMU and 3D terrain. Public goal: /navigate_to_pose')
 
+    @locked
+    def select_lidar(self):
+        topic=self.get_parameter('lidar_topic').value
+        sensor_id=self.get_parameter('lidar_sensor_id').value
+        if not topic and sensor_id not in ('','auto'):
+            topic='/ksp_vessel/lidar_3d/'+sensor_id+'/points'
+        if not topic:
+            candidates=sorted(name for name,types in self.get_topic_names_and_types()
+                if name.startswith('/ksp_vessel/lidar_3d/') and name.endswith('/points')
+                and 'sensor_msgs/msg/PointCloud2' in types and self.count_publishers(name)>0)
+            topic=candidates[0] if len(candidates)==1 else ''
+            self.lidar_selection_reason=('multiple_3d_lidars: set lidar_sensor_id' if candidates else 'waiting_for_3d_lidar') if not topic else ''
+        else: self.lidar_selection_reason=''
+        if topic==self.lidar_topic: return
+        self.stop('lidar_source_changed')
+        if self.lidar_subscription is not None:
+            self.destroy_subscription(self.lidar_subscription); self.lidar_subscription=None
+        self.reset_state(); self.lidar_topic=topic
+        if topic:
+            self.lidar_subscription=self.create_subscription(PointCloud2,topic,
+                lambda msg,source=topic:self.cloud(msg,source),
+                QoSProfile(depth=1,reliability=ReliabilityPolicy.BEST_EFFORT),callback_group=self.cloud_group)
+            self.get_logger().info('Selected 3D LiDAR: '+topic)
+
     def reset_state(self):
         self.reset_serial+=1
-        self.est=Estimator(); self.terrain=Terrain(); self.geometry=None
+        self.est=Estimator(); self.terrain=Terrain(); self.geometry=None; self.geometry_data=None
         self.wheels={}; self.wheel_times={}; self.wheel_stamps={}; self.imu_samples=deque(maxlen=45)
         self.imu_time=0.; self.last_imu_stamp=None; self.cloud_time=0.; self.cloud_stamp=-1.
         self.gyro=np.zeros(3); self.speed=0.; self.slip=0.; self.poses=deque(maxlen=150)
         self.configured=False; self.config_future=None; self.configured_at=0.
+        self.planner_active=False; self.planner_state_future=None
+        self.goal_tolerances=None; self.goal_config_future=None; self.goal_braking=False
         self.trail=Path(); self.trail.header.frame_id='map'; self.last_trail=0.
         self.last_report='waiting_for_sensors'; self.last_stamp=None; self.map_time=0.
         self.cloud_duration=0.; self.mount_age=0.; self.cloud_interval=0.
+        self.map_observation_time=0.; self.map_duration=0.
         self.publish_map(self.get_clock().now().to_msg())
 
     @locked
@@ -139,8 +178,11 @@ class Rover(Node):
             try:
                 wheels=[Wheel(m.id,*xyz(m.position),m.radius,m.rolling_sign,m.steering_sign,m.steering_enabled,m.max_steering_angle) for m in self.wheels.values()]
                 self.geometry=Geometry(wheels,xyz(msg.body_min),xyz(msg.body_max),self.get_parameter('footprint_margin').value)
-                self.geometry_pub.publish(String(data=json.dumps(dict(minimum_turning_radius=self.geometry.min_radius,
-                    rear_x=self.geometry.rear_x,footprint=self.geometry.footprint,wheels=[w.__dict__ for w in self.geometry.wheels]))))
+                self.geometry_data=dict(minimum_turning_radius=self.geometry.min_radius,
+                    steering_mode=self.geometry.steering_mode,
+                    estimator_generation=self.reset_serial,rear_x=self.geometry.rear_x,
+                    footprint=self.geometry.footprint,wheels=[w.__dict__ for w in self.geometry.wheels])
+                self.geometry_pub.publish(String(data=json.dumps(self.geometry_data)))
                 self.get_logger().info(f'Geometry ready: {len(wheels)} wheels, minimum radius {self.geometry.min_radius:.2f} m')
             except ValueError as e: self.last_report=str(e)
 
@@ -153,7 +195,7 @@ class Rover(Node):
         dt=0. if self.last_imu_stamp is None else stamp-self.last_imu_stamp
         self.last_imu_stamp=stamp; self.imu_time=now; self.gyro=gyro; self.last_stamp=msg.header.stamp
         if self.geometry is None or not self.wheels_fresh(now): return
-        state={k:(v.angular_velocity,v.slip) for k,v in self.wheels.items()}
+        state={k:(v.angular_velocity,v.slip,v.steering_angle) for k,v in self.wheels.items()}
         self.speed,self.slip=self.geometry.speed(state,float((gyro-self.est.gyro_bias)[2]))
         self.slip=max(self.slip,float(np.median([abs(m.slip) for m in self.wheels.values()])))
         if not self.est.initialized:
@@ -173,18 +215,20 @@ class Rover(Node):
     def wheels_fresh(self,now):
         return self.geometry is not None and all(now-self.wheel_times.get(w.id,0)<0.5 for w in self.geometry.wheels)
 
-    def cloud(self,msg):
+    def cloud(self,msg,source=None):
         begun=time.monotonic()
+        self.finish_map()
         stamp=seconds(msg.header.stamp)
         with self.lock:
+            if source is not None and source!=self.lidar_topic: return
             if not self.est.initialized or not self.poses or stamp<=self.cloud_stamp: return
             self.cloud_stamp=stamp
             sample=min(self.poses,key=lambda item:abs(item[0]-stamp))
             if abs(sample[0]-stamp)>0.15: self.last_report='lidar_imu_time_mismatch'; return
             serial=self.reset_serial; work=copy.deepcopy(self.est)
             work.pose=sample[1].copy(); geometry=self.geometry
-            update_map=time.monotonic()-self.map_time>=0.5
-            terrain=copy.deepcopy(self.terrain) if update_map else None
+            update_map=self.map_future is None and begun-self.map_time>=0.5
+            terrain=self.terrain if update_map else None
             stationary=abs(self.speed)<0.02 and all(m.grounded for m in self.wheels.values())
         try:
             # Fixed sensor mounts may arrive a tick after the scan. Use only a
@@ -208,9 +252,6 @@ class Rover(Node):
                 self.last_report=work.quality; return
             correction=at_scan@np.linalg.inv(sample[1])
             world=transform_points(body,at_scan)
-            if terrain is not None:
-                if not terrain.bootstrapped and stationary: terrain.seed_contact_patch(at_scan,geometry)
-                terrain.update(world)
             with self.lock:
                 if serial!=self.reset_serial: return
                 self.est.pose=correction@self.est.pose
@@ -221,22 +262,52 @@ class Rover(Node):
                 self.cloud_interval=time.monotonic()-self.cloud_time
                 self.cloud_time=time.monotonic(); self.cloud_duration=self.cloud_time-begun
                 self.last_report=work.quality
-                if terrain is not None:self.terrain=terrain;self.map_time=time.monotonic()
+                if terrain is not None:
+                    self.map_job=(serial,msg.header.stamp,begun)
+                    self.map_future=self.map_worker.submit(self.build_map,terrain,world,at_scan,geometry,stationary)
             h=Header(stamp=msg.header.stamp,frame_id='map')
             self.cloud_pub.publish(point_cloud2.create_cloud_xyz32(h,world.astype(np.float32)))
-            if terrain is not None:
-                self.ground_pub.publish(point_cloud2.create_cloud_xyz32(h,terrain.ground.astype(np.float32)))
-                self.obstacle_pub.publish(point_cloud2.create_cloud_xyz32(h,terrain.obstacles.astype(np.float32)))
-                self.publish_map(msg.header.stamp)
         except (TransformException,ValueError,TypeError) as e:
             self.last_report='pointcloud: '+str(e)
+
+    @staticmethod
+    def build_map(previous,world,pose,geometry,stationary):
+        # Published terrain snapshots are immutable. Copy and triangulate off
+        # the estimator/control locks, with at most one outstanding map job.
+        terrain=copy.deepcopy(previous)
+        if not terrain.bootstrapped and stationary: terrain.seed_contact_patch(pose,geometry)
+        terrain.update(world)
+        return terrain
+
+    def finish_map(self):
+        if self.map_future is None or not self.map_future.done(): return
+        serial,stamp,observed_at=self.map_job
+        future=self.map_future; self.map_future=None
+        try: terrain=future.result()
+        except Exception as error:
+            with self.lock:
+                if serial==self.reset_serial: self.stop('terrain_update_failed: '+str(error))
+            return
+        with self.lock:
+            if serial!=self.reset_serial: return
+            self.terrain=terrain; self.map_time=time.monotonic()
+            self.map_observation_time=observed_at; self.map_duration=self.map_time-observed_at
+        h=Header(stamp=stamp,frame_id='map')
+        self.ground_pub.publish(point_cloud2.create_cloud_xyz32(h,terrain.ground.astype(np.float32)))
+        self.obstacle_pub.publish(point_cloud2.create_cloud_xyz32(h,terrain.obstacles.astype(np.float32)))
+        self.publish_map(stamp)
+
+    def destroy_node(self):
+        self.map_worker.shutdown(wait=True,cancel_futures=True)
+        return super().destroy_node()
 
     def publish_pose(self,stamp):
         R=self.est.pose[:3,:3]; yaw=math.atan2(R[1,0],R[0,0])
         position=self.est.pose[:3,3]; rear=position+R@np.array([self.geometry.rear_x,0.,0.])
         qyaw=Rotation.from_euler('z',yaw).as_quat()
-        # footprint lies in the start tangent plane. The child carries true
-        # height, roll/pitch and the rear-axle to CoM offset.
+        # The footprint lies in the start tangent plane. Its origin is the
+        # zero-lateral-velocity axle (rear or center); the child carries the
+        # estimated height, roll/pitch and offset to the CoM.
         tf=TransformStamped(); tf.header=Header(stamp=stamp,frame_id='pylon_rover_odom'); tf.child_frame_id='pylon_rover_base_footprint'
         tf.transform.translation.x=float(rear[0]); tf.transform.translation.y=float(rear[1])
         tf.transform.rotation.x,tf.transform.rotation.y,tf.transform.rotation.z,tf.transform.rotation.w=map(float,qyaw)
@@ -268,26 +339,51 @@ class Rover(Node):
         msg=OccupancyGrid(); msg.header=Header(stamp=stamp,frame_id='map')
         msg.info.resolution=self.terrain.resolution; msg.info.width=self.terrain.n; msg.info.height=self.terrain.n
         msg.info.origin.position.x=-self.terrain.size/2; msg.info.origin.position.y=-self.terrain.size/2
-        msg.info.origin.orientation.w=1.; msg.data=self.terrain.grid.ravel().tolist()
+        msg.info.origin.orientation.w=1.; msg.data=array('b',self.terrain.grid.tobytes())
         self.map_pub.publish(msg)
 
     def ready_reason(self):
         now=time.monotonic()
         if not self.vessel_active: return 'waiting_for_vessel'
         if self.geometry is None: return self.last_report
+        if self.lidar_selection_reason: return self.lidar_selection_reason
         if not self.wheels_fresh(now): return 'wheel_timeout'
         if not all(m.enabled and m.grounded for m in self.wheels.values()): return 'wheel_disabled_or_airborne'
         if now-self.imu_time>0.5: return 'imu_timeout'
         if not self.est.initialized: return 'waiting_for_stationary_imu_on_Mun'
         if now-self.cloud_time>0.5: return 'lidar_timeout: '+self.last_report
+        if not self.terrain.bootstrapped or not self.map_observation_time: return 'waiting_for_terrain'
+        if now-self.map_observation_time>2.: return 'terrain_timeout'
         if self.est.sigma>self.get_parameter('position_sigma_limit').value: return 'position_uncertain'
         up=self.est.pose[:3,2]
         if up[2]<math.cos(math.radians(20)): return 'excessive_tilt'
-        if not self.configured or now-self.configured_at<2: return 'configuring_nav2_geometry'
+        if not self.configured or self.goal_tolerances is None or now-self.configured_at<2: return 'configuring_nav2_geometry'
         return ''
 
     def configure(self):
+        if self.goal_tolerances is None:
+            if self.goal_config_future is not None and self.goal_config_future.done():
+                try:
+                    values=self.goal_config_future.result().values
+                    tolerances=tuple(v.double_value for v in values)
+                    if len(tolerances)==2 and all(np.isfinite(v) and v>0 for v in tolerances):
+                        self.goal_tolerances=tolerances
+                except Exception as e: self.last_report='goal checker configuration: '+str(e)
+                self.goal_config_future=None
+            elif self.goal_config_future is None and self.goal_param_client.services_are_ready():
+                self.goal_config_future=self.goal_param_client.get_parameters(
+                    ['goal_checker.xy_goal_tolerance','goal_checker.yaw_goal_tolerance'])
         if self.geometry is None or self.configured: return
+        # Smac installs its parameter callback during activation. Before that,
+        # a successful set only changes the parameter store, not its motion model.
+        if not self.planner_active:
+            if self.planner_state_future is not None and self.planner_state_future.done():
+                try: self.planner_active=self.planner_state_future.result().current_state.id==State.PRIMARY_STATE_ACTIVE
+                except Exception as e: self.last_report='planner lifecycle: '+str(e)
+                self.planner_state_future=None
+            elif self.planner_state_future is None and self.planner_state_client.service_is_ready():
+                self.planner_state_future=self.planner_state_client.call_async(GetState.Request())
+            if not self.planner_active: return
         if self.config_future is not None:
             if not self.config_future.done(): return
             try:
@@ -348,6 +444,12 @@ class Rover(Node):
             self.send_authority(self.lease.release_action()); return
         if not self.command_time: return
         self.send_authority(self.lease.due_action(now))
+        if self.goal_braking or self.inside_goal():
+            # RPP deliberately keeps a nonzero approach speed. Hold a real
+            # parking brake so StoppedGoalChecker can observe zero velocity.
+            # Nav2 still owns the success decision; late twists cannot restart.
+            self.goal_braking=True; self.sent_speed=0.
+            self.send_wheels(0.,0.,1.); return
         v,w=self.target
         v=limited_speed(self.sent_speed,v,dt)
         w=float(np.clip(w,-v/self.geometry.min_radius,v/self.geometry.min_radius))
@@ -358,6 +460,15 @@ class Rover(Node):
                 self.stop('unobserved_or_blocked_stopping_corridor'); self.send_wheels(0.,0.,1.); return
         self.send_wheels(v,w,1. if v<0.005 else 0.)
         self.sent_speed=v
+
+    def inside_goal(self):
+        if self.goal_tolerances is None or self.active_goal is None: return False
+        pose=self.active_goal.request.pose.pose; q=pose.orientation
+        goal_yaw=math.atan2(2*(q.w*q.z+q.x*q.y),1-2*(q.y*q.y+q.z*q.z))
+        R=self.est.pose[:3,:3]; rear=self.est.pose[:3,3]+R@np.array([self.geometry.rear_x,0.,0.])
+        yaw=math.atan2(R[1,0],R[0,0]); error=math.atan2(math.sin(yaw-goal_yaw),math.cos(yaw-goal_yaw))
+        xy_tol,yaw_tol=self.goal_tolerances
+        return math.hypot(rear[0]-pose.position.x,rear[1]-pose.position.y)<min(.25,xy_tol*.5) and abs(error)<yaw_tol*.8
 
     @locked
     def stop(self,reason):
@@ -402,7 +513,7 @@ class Rover(Node):
 
     async def execute(self,handle):
         self.active_goal=handle; self.child_goal=None; self.fault=''; self.command_time=0.; self.started_at=time.monotonic()
-        self.target=(0.,0.); result=NavigateToPose.Result()
+        self.target=(0.,0.); self.goal_braking=False; result=NavigateToPose.Result()
         try:
             child=await self.await_nav2(self.nav_client.send_goal_async(handle.request,feedback_callback=lambda m:handle.publish_feedback(m.feedback) if handle.is_active else None),5.)
             self.child_goal=child
@@ -439,9 +550,13 @@ class Rover(Node):
 
     def report(self):
         reason=self.ready_reason()
-        state=dict(ready=not bool(reason),reason=reason,active=self.active_goal is not None,fault=self.fault,
+        if self.geometry_data is not None:self.geometry_pub.publish(String(data=json.dumps(self.geometry_data)))
+        state=dict(ready=not bool(reason),reason=reason,active=self.active_goal is not None,fault=self.fault,lidar_topic=self.lidar_topic,
+                   estimator_generation=self.reset_serial,
                    estimator=self.est.quality,position_sigma=self.est.sigma,lidar_rmse=self.est.rmse,
                    lidar_rank=self.est.observed_rank,cloud_duration=self.cloud_duration,cloud_interval=self.cloud_interval,mount_age=self.mount_age,speed=self.speed,observed_free=int((self.terrain.grid==0).sum()))
+        state.update(map_duration=self.map_duration,goal_braking=self.goal_braking,
+                     wheel_age=max((time.monotonic()-t for t in self.wheel_times.values()),default=0.))
         self.status_pub.publish(String(data=json.dumps(state)))
         marker=Marker(); marker.header=Header(stamp=self.get_clock().now().to_msg(),frame_id='map')
         marker.ns='status'; marker.id=0; marker.type=Marker.TEXT_VIEW_FACING; marker.action=Marker.ADD

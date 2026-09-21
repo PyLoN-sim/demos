@@ -8,4 +8,5 @@ setup(name=name,version='0.1.0',packages=find_packages(exclude=['test']),
     install_requires=['setuptools','numpy','scipy'],zip_safe=True,
     maintainer='PyLoN',maintainer_email='user@example.com',license='MIT',
     description='Sensor-only Mun rover navigation with Nav2 and guarded wheel control',
-    entry_points={'console_scripts':['rover_node=pylon_demo_mun_rover.node:main','evaluate=pylon_demo_mun_rover.evaluation:main']})
+    entry_points={'console_scripts':['rover_node=pylon_demo_mun_rover.node:main','evaluate=pylon_demo_mun_rover.evaluation:main',
+                                    'visualization=pylon_demo_mun_rover.visualization:main']})

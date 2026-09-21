@@ -3,24 +3,9 @@ Panels:
   Help Height: 0
   Name: Displays
   Property Tree Widget:
-    Expanded:
-    - /Global Options1
-    - /TF1/Frames1
-    - /TF1/Tree1
+    Expanded: []
     Splitter Ratio: 0.5833333134651184
-  Tree Height: 287
-- Class: rviz_common/Selection
-  Name: Selection
-- Class: rviz_common/Tool Properties
-  Expanded:
-  - /Publish Point1
-  Name: Tool Properties
-  Splitter Ratio: 0.5886790156364441
-- Class: rviz_common/Views
-  Expanded:
-  - /Current View1
-  Name: Views
-  Splitter Ratio: 0.3333333432674408
+  Tree Height: 650
 - Class: nav2_rviz_plugins/Navigation 2
   Name: Navigation 2
 Visualization Manager:
@@ -56,7 +41,7 @@ Visualization Manager:
     Color Scheme: map
   - Class: rviz_default_plugins/Map
     Name: Local costs
-    Enabled: true
+    Enabled: false
     Topic:
       Value: /pylon/mun_rover/local_costmap/costmap
       Reliability Policy: Reliable
@@ -66,7 +51,7 @@ Visualization Manager:
     Color Scheme: costmap
   - Class: rviz_default_plugins/PointCloud2
     Name: 3D LiDAR
-    Enabled: true
+    Enabled: false
     Topic:
       Value: /pylon/mun_rover/points
       Reliability Policy: Best Effort
@@ -79,7 +64,7 @@ Visualization Manager:
     Position Transformer: XYZ
   - Class: rviz_default_plugins/PointCloud2
     Name: Ground
-    Enabled: true
+    Enabled: false
     Topic:
       Value: /pylon/mun_rover/ground
       Reliability Policy: Best Effort
@@ -114,6 +99,10 @@ Visualization Manager:
     Color: 60; 180; 255
     Line Style: Billboards
     Line Width: 0.1
+    Offset:
+      X: 0.0
+      Y: 0.0
+      Z: 0.15
   - Class: rviz_default_plugins/Path
     Name: Driven path
     Enabled: true
@@ -125,6 +114,10 @@ Visualization Manager:
     Color: 255; 210; 60
     Line Style: Billboards
     Line Width: 0.1
+    Offset:
+      X: 0.0
+      Y: 0.0
+      Z: 0.15
   - Class: rviz_default_plugins/Polygon
     Name: Rover footprint
     Enabled: true
@@ -137,11 +130,39 @@ Visualization Manager:
   - Class: rviz_default_plugins/Marker
     Name: Status
     Enabled: true
-    Marker Topic:
+    Topic:
       Value: /pylon/mun_rover/status_marker
       Reliability Policy: Reliable
       Durability Policy: Volatile
       Depth: 5
+  - Class: rviz_default_plugins/RobotModel
+    Name: Rover URDF
+    Enabled: true
+    Description Source: Topic
+    Description Topic:
+      Value: /pylon/mun_rover/robot_description
+      Reliability Policy: Reliable
+      Durability Policy: Transient Local
+      Depth: 1
+    Visual Enabled: true
+    Collision Enabled: false
+    Alpha: 1
+    Update Interval: 0
+  - Class: rviz_default_plugins/PointCloud2
+    Name: Surface photos
+    Enabled: true
+    Topic:
+      Value: /pylon/mun_rover/photo_map
+      Reliability Policy: Reliable
+      Durability Policy: Transient Local
+      Depth: 1
+    Position Transformer: XYZ
+    Color Transformer: RGB8
+    Style: Flat Squares
+    Size (m): 0.1
+    Alpha: 1
+    Decay Time: 0
+    Selectable: false
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
@@ -180,35 +201,20 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 45
+      Distance: 35.0
       Pitch: 1.1
-      Yaw: 0.0
+      Yaw: 3.14
       Focal Point:
         X: 0
         Y: 0
         Z: 0
-      Target Frame: <Fixed Frame>
+      Target Frame: pylon_rover_base_footprint
+      Name: Current View
+      Value: Orbit (rviz_default_plugins)
 Window Geometry:
-  Displays:
-    collapsed: false
-  Docking:
-    collapsed: false
-  Height: 893
+  Height: 1500
+  Width: 2200
+  X: 80
+  Y: 100
   Hide Left Dock: false
   Hide Right Dock: false
-  Navigation 2:
-    collapsed: false
-  QMainWindow State: 000000ff00000000fd00000004000000000000015600000327fc020000000afb0000001200530065006c0065006300740069006f006e00000001e10000009b0000005c00fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007302000001ed000001df00000185000000a3fb000000120056006900650077007300200054006f006f02000001df000002110000018500000122fb000000200054006f006f006c002000500072006f0070006500720074006900650073003203000002880000011d000002210000017afb0000002000730065006c0065006300740069006f006e00200062007500660066006500720200000138000000aa0000023a00000294fb00000014005700690064006500530074006500720065006f02000000e6000000d2000003ee0000030bfb0000000c004b0069006e0065006300740200000186000001060000030c00000261fb000000100044006900730070006c006100790073010000003b0000015a000000c700fffffffb00000018004e0061007600690067006100740069006f006e00200032010000019b000001c7000001c700fffffffb0000001e005200650061006c00730065006e0073006500430061006d00650072006100000002c6000000c10000002800ffffff000000010000014700000327fc0200000005fb0000001e0054006f006f006c002000500072006f00700065007200740069006500730100000041000000780000000000000000fb0000000a00560069006500770073010000003b00000143000000a000fffffffb0000000e0044006f0063006b0069006e006701000001840000011e0000011e00fffffffb0000001000530065006c006500630074006f007201000002a8000000ba000000ba00fffffffb0000001200530065006c0065006300740069006f006e010000025a000000b200000000000000000000000200000490000000a9fc0100000001fb0000000a00560069006500770073030000004e00000080000002e10000019700000003000004420000003efc0100000002fb0000000800540069006d00650100000000000004420000000000000000fb0000000800540069006d00650100000000000004500000000000000000000003a10000032700000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
-  RealsenseCamera:
-    collapsed: false
-  Selection:
-    collapsed: false
-  Selector:
-    collapsed: false
-  Tool Properties:
-    collapsed: false
-  Views:
-    collapsed: false
-  Width: 1610
-  X: 1091
-  Y: 222

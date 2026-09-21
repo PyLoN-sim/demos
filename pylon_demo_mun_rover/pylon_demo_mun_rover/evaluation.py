@@ -30,11 +30,18 @@ class Evaluation(Node):
         self.create_subscription(Odometry,'/pylon/mun_rover/odom_3d',self.estimate,qos_profile_sensor_data)
         from pylon_interfaces.msg import VesselLifecycle
         from rclpy.qos import QoSProfile,DurabilityPolicy
-        self.epoch=None; self.rear_x=None; self.previous=None; self.truth_speed=0.
+        self.epoch=None; self.rear_x=None; self.previous=None; self.truth_speed=0.; self.estimator_generation=None
         self.create_subscription(String,'/pylon/mun_rover/geometry',self.geometry,QoSProfile(depth=1,durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.create_subscription(VesselLifecycle,'/ksp_vessel/lifecycle',self.lifecycle,QoSProfile(depth=1,durability=DurabilityPolicy.TRANSIENT_LOCAL))
     def geometry(self,msg):
-        self.rear_x=float(json.loads(msg.data)['rear_x'])
+        data=json.loads(msg.data)
+        self.rear_x=float(data['rear_x'])
+        generation=data.get('estimator_generation')
+        if generation!=self.estimator_generation:
+            # A manual estimator reset changes the map origin without changing
+            # KSP's flight session. Start a new independent alignment as well.
+            self.alignment=None; self.previous=None; self.truth.clear()
+            self.estimator_generation=generation
     def lifecycle(self,msg):
         epoch=(msg.vessel_id,msg.generation)
         if self.epoch!=epoch: self.truth.clear(); self.alignment=None; self.previous=None

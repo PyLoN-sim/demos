@@ -1,5 +1,6 @@
 import math
 import unittest
+from dataclasses import replace
 import numpy as np
 from scipy.spatial.transform import Rotation
 from pylon_demo_mun_rover.core import Wheel,Geometry,Estimator,limited_speed
@@ -27,10 +28,36 @@ class CoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):Geometry(w,[-1]*3,[1]*3)
     def test_speed_sign_and_acceleration(self):
         g=geometry();cmd=g.commands(.4,0.)
-        speed,slip=g.speed({k:(v[0],0.) for k,v in cmd.items()},0.)
+        speed,slip=g.speed({k:(v[0],0.,v[1]) for k,v in cmd.items()},0.)
         self.assertAlmostEqual(speed,.4);self.assertAlmostEqual(slip,0.)
         self.assertAlmostEqual(limited_speed(0.,.5,.05),.01)
         with self.assertRaises(ValueError):g.commands(-1,0)
+    def test_all_wheel_counter_steering_and_measured_odometry(self):
+        original=geometry()
+        for middle in (False,True):
+            wheels=[replace(w,steering=True,steering_sign=-1.) for w in original.wheels]
+            if middle:
+                wheels += [Wheel(f'mid{y}',0.,y,-.7,.3,1.,-1.,False,.5) for y in (-1.,1.)]
+            g=Geometry(wheels,[-1.5]*3,[1.5]*3)
+            self.assertEqual(g.steering_mode,'counter_phase')
+            self.assertEqual(g.rear_x,0.)
+            self.assertLess(g.min_radius,original.min_radius)
+            for omega in (-.08,.08):
+                cmd=g.commands(.4,omega)
+                self.assertLess(cmd['1.0_1.0'][1]*cmd['-1.0_1.0'][1],0.)
+                for w in wheels:
+                    angular,angle=cmd[w.id]
+                    speed=angular*w.radius*w.rolling_sign
+                    self.assertAlmostEqual(speed*math.cos(angle*w.steering_sign),.4-omega*w.y)
+                    if w.steering:self.assertAlmostEqual(speed*math.sin(angle*w.steering_sign),omega*w.x)
+                speed,slip=g.speed({k:(c[0],0.,c[1]) for k,c in cmd.items()},omega)
+                self.assertAlmostEqual(speed,.4);self.assertAlmostEqual(slip,0.)
+            self.assertTrue(all(abs(c[1])<=.5 for c in g.commands(.5,100).values()))
+
+    def test_front_steering_odometry_during_turn(self):
+        g=geometry();cmd=g.commands(.4,.08)
+        speed,slip=g.speed({k:(v[0],0.,v[1]) for k,v in cmd.items()},.08)
+        self.assertAlmostEqual(speed,.4);self.assertAlmostEqual(slip,0.)
     def test_gravity_and_prediction(self):
         est=Estimator();R=Rotation.from_euler('y',.1).as_matrix()
         self.assertTrue(est.initialize([R.T@np.array([0,0,1.63])]*35,[[0,0,0]]*35))
