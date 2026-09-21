@@ -1,6 +1,15 @@
 # pylon_demo_debris_orbit: LiDAR＋IMU周回デモ
 
-機体の準備から停止までの手順は、[デモガイド](../../docs/demos/debris-orbit.md)を参照してください。
+## 共通の実行入口
+
+demosリポジトリのルートで実行します。依存パッケージの導入は[共通準備](../README.md)を参照してください。
+
+```bash
+./pylon_demo_debris_orbit/build.sh
+./pylon_demo_debris_orbit/run.sh  # launch引数を後ろに追加できます
+```
+
+機体の準備から停止までの手順は、[デモガイド](https://github.com/PyLoN-sim/docs/blob/main/demos/debris-orbit.md)を参照してください。
 
 3D LiDARと6軸IMUだけでデブリへの相対位置・相対速度・姿勢変化を推定し、LiDARを向けながらRCSで周回します。**推定器・誘導器・制御器のすべてでGround Truthを購読しません。** 機体カメラで36度ごとに撮影し、次の周回も撮影を続けます。
 
@@ -19,7 +28,7 @@ IMU ─ ジャイロ積分・比力予測 ─┘               │              
 
 全6軸を操作できるRCS、3D LiDAR（Sensor ID `front_lidar`）、LiDARと同方向を向くカメラ（`orbit_camera`）を搭載します。センサー取付位置・姿勢は、機体内のTFから取得します。
 
-[起動手順](../../docs/guide/getting-started.md)に従ってビルド・同期し、KSPの通常操作で機体を開いてください。
+[起動手順](https://github.com/PyLoN-sim/docs/blob/main/guide/getting-started.md)に従ってビルド・同期し、KSPの通常操作で機体を開いてください。
 
 Flightが開いたら別ターミナルでbridgeを起動します。`--disable-ground-truth`は真値パケットを破棄し、真値Topicとworld TFを配信しません。機体ID・lifecycleもIMUパケットから取得します。
 
@@ -88,8 +97,8 @@ Topicルートは`/ksp_vessel/demos/debris_orbit/<demo_instance_id>`:
 ```bash
 source /opt/ros/jazzy/setup.bash
 source ~/ros2_ws/install/setup.bash
-PYTHONPATH="Demo/pylon_demo_debris_orbit:Ros2/pylon_vehicle_control:Ros2/pylon_bridge:$PYTHONPATH" \
-  /usr/bin/python3 -m unittest discover -s Demo/pylon_demo_debris_orbit/test -v
+PYTHONPATH="pylon_demo_debris_orbit:../PyLoN/Ros2/pylon_vehicle_control:../PyLoN/Ros2/pylon_bridge:$PYTHONPATH" \
+  /usr/bin/python3 -m unittest discover -s pylon_demo_debris_orbit/test -v
 ```
 
 ROS結合テストは独立したdomainで動作し、試験中のKSPへ指令を送りません。

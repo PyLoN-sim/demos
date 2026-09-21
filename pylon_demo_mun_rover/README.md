@@ -1,12 +1,21 @@
 # Mun rover / RViz Nav2 demo
 
-機体の準備から停止までの手順は、[デモガイド](../../docs/demos/mun-nav2.md)を参照してください。
+## 共通の実行入口
+
+demosリポジトリのルートで実行します。依存パッケージの導入は[共通準備](../README.md)を参照してください。
+
+```bash
+./pylon_demo_mun_rover/build.sh
+./pylon_demo_mun_rover/run.sh  # launch引数を後ろに追加できます
+```
+
+機体の準備から停止までの手順は、[デモガイド](https://github.com/PyLoN-sim/docs/blob/main/demos/mun-nav2.md)を参照してください。
 
 ROS 2 Jazzy。前輪操舵または前後輪操舵の4輪・6輪ローバーを、3D LiDAR・IMU・車輪情報から推定して走らせます。RVizの **Nav2 Goal** は到着位置と向きを指定します。内部Nav2 actionは `/pylon/mun_rover/navigate_to_pose`、安全監視を通る公開actionは `/navigate_to_pose` です。直接内部actionへ指令しないでください。
 
 ## 起動
 
-KSPの通常操作で下記の条件を満たす機体を月面に配置し、停止・接地を確認します。ビルドは`./sync.sh --demo mun_rover`です。
+KSPの通常操作で下記の条件を満たす機体を月面に配置し、停止・接地を確認します。ビルドは`./pylon_demo_mun_rover/build.sh`です。
 
 ```bash
 source /opt/ros/jazzy/setup.bash
@@ -90,7 +99,7 @@ WheelStateにはSIの半径・機体座標内の位置・車体境界・回転�
 ```bash
 source /opt/ros/jazzy/setup.bash
 source ~/ros2_ws/install/setup.bash
-PYTHONPATH="Ros2/pylon_bridge:Ros2/pylon_perception:Demo/pylon_demo_mun_rover:$PYTHONPATH" \
-  python3 -m unittest discover -s Demo/pylon_demo_mun_rover/test -v
-./sync.sh --demo mun_rover
+PYTHONPATH="../PyLoN/Ros2/pylon_bridge:../PyLoN/Ros2/pylon_perception:pylon_demo_mun_rover:$PYTHONPATH" \
+  python3 -m unittest discover -s pylon_demo_mun_rover/test -v
+./pylon_demo_mun_rover/build.sh
 ```

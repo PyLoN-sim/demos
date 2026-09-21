@@ -1,0 +1,41 @@
+name: ROS 2 demos
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  jazzy:
+    runs-on: ubuntu-24.04
+    container: ros:jazzy-ros-base
+    defaults:
+      run:
+        shell: bash
+    env:
+      ROS2_WS: ${{ github.workspace }}/ros2_ws
+      ROS_DOMAIN_ID: 173
+      ROS_AUTOMATIC_DISCOVERY_RANGE: LOCALHOST
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: demos
+      - uses: actions/checkout@v4
+        with:
+          repository: PyLoN-sim/PyLoN
+          path: PyLoN
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y rsync python3-pytest python3-colcon-common-extensions
+          source /opt/ros/jazzy/setup.bash
+          rosdep update --rosdistro jazzy
+          rosdep install --from-paths PyLoN/Ros2 demos --ignore-src --rosdistro jazzy -y
+      - name: Build all demos with the separate core checkout
+        run: |
+          ./PyLoN/sync.sh --skip-ksp-build --skip-ksp-sync --all-demos
+      - name: Test
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          source "$ROS2_WS/install/setup.bash"
+          for script in demos/scripts/*.sh demos/pylon_demo_*/*.sh; do bash -n "$script"; done
+          for package in demos/pylon_demo_*; do
+            python3 -m pytest --import-mode=importlib -q "$package/test"
+          done

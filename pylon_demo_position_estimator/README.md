@@ -1,5 +1,14 @@
 # pylon_demo_position_estimator デモ
 
+## 共通の実行入口
+
+demosリポジトリのルートで実行します。依存パッケージの導入は[共通準備](../README.md)を参照してください。
+
+```bash
+./pylon_demo_position_estimator/build.sh
+./pylon_demo_position_estimator/run.sh  # launch引数を後ろに追加できます
+```
+
 3D LiDARの点群だけから6DoFの自己位置を推定するROS 2 Jazzyパッケージです。連続する2スキャン間のpoint-to-point ICPで相対姿勢を求め、積算して`nav_msgs/msg/Odometry`とTFを配信します。推定そのものにGround Truthは使いませんが、採点専用に購読し、開始時点合わせのドリフト誤差をコンソールと専用Topicへ出します。
 
 ```text
@@ -23,7 +32,7 @@
 リポジトリ直下で次を実行すると、本体のROS2パッケージ、`pylon_perception`と一緒にこのデモを`~/ros2_ws`へ同期・ビルドされます。
 
 ```bash
-./sync.sh --demo position_estimator
+./pylon_demo_position_estimator/build.sh
 source ~/ros2_ws/install/setup.bash
 ```
 
@@ -31,7 +40,7 @@ source ~/ros2_ws/install/setup.bash
 
 ```bash
 mkdir -p ~/ros2_ws/src
-cp -r Demo/pylon_demo_position_estimator ~/ros2_ws/src/
+cp -r pylon_demo_position_estimator ~/ros2_ws/src/
 cd ~/ros2_ws
 source /opt/ros/jazzy/setup.bash
 rosdep install --from-paths src --ignore-src --rosdistro jazzy -y

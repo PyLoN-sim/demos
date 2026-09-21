@@ -1,11 +1,20 @@
 # pylon_demo_lidar_slam
 
-2D LiDARのスキャンから平面odometryを求め、SLAM Toolboxで地図を作成するデモです。Nav2の速度指令をPyLoNのlease付きBody Wrenchへ変換し、保存地図を使うAMCLナビゲーションにも対応します。
+## 共通の実行入口
 
-導入、機体準備、地図作成、保存、Nav2走行、停止の手順は[2D LiDARとSLAM](../../docs/demos/lidar-slam.md)にまとめています。
+demosリポジトリのルートで実行します。依存パッケージの導入は[共通準備](../README.md)を参照してください。
 
 ```bash
-./sync.sh --demo lidar_slam
+./pylon_demo_lidar_slam/build.sh
+./pylon_demo_lidar_slam/run.sh  # launch引数を後ろに追加できます
+```
+
+2D LiDARのスキャンから平面odometryを求め、SLAM Toolboxで地図を作成するデモです。Nav2の速度指令をPyLoNのlease付きBody Wrenchへ変換し、保存地図を使うAMCLナビゲーションにも対応します。
+
+導入、機体準備、地図作成、保存、Nav2走行、停止の手順は[2D LiDARとSLAM](https://github.com/PyLoN-sim/docs/blob/main/demos/lidar-slam.md)にまとめています。
+
+```bash
+./pylon_demo_lidar_slam/build.sh
 source /opt/ros/jazzy/setup.bash
 source ~/ros2_ws/install/setup.bash
 ros2 launch pylon_demo_lidar_slam mapping.launch.py \
@@ -35,10 +44,10 @@ TFは`map → pylon_slam_odom → pylon_slam_base_link`です。ベースフレ�
 ```bash
 source /opt/ros/jazzy/setup.bash
 source ~/ros2_ws/install/setup.bash
-PYTHONPATH=Demo/pylon_demo_lidar_slam:Ros2/pylon_vehicle_control \
-  python3 -m unittest discover -s Demo/pylon_demo_lidar_slam/test -v
+PYTHONPATH=pylon_demo_lidar_slam:../PyLoN/Ros2/pylon_vehicle_control \
+  python3 -m unittest discover -s pylon_demo_lidar_slam/test -v
 ```
 
 数値処理・セッション管理・設定のテストはNumPyとPyYAMLがあれば実行できます。ROSアダプターのテストはROS2とビルド済み`pylon_interfaces`を必要とし、独立したDDS domainで実行します。
 
-実装変更の手順は[本体開発ガイド](../../docs/contributing/index.md)を参照してください。
+実装変更の手順は[本体開発ガイド](https://github.com/PyLoN-sim/docs/blob/main/contributing/index.md)を参照してください。

@@ -1,0 +1,8 @@
+**
+!pylon_demo_reusable/
+!pylon_demo_reusable/**
+!scripts/
+!scripts/spaceros-entrypoint.sh
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
