@@ -3,6 +3,7 @@ from dataclasses import asdict
 import json
 import math
 import time
+import uuid
 
 import rclpy
 from rclpy.lifecycle import LifecycleNode, TransitionCallbackReturn as Result
@@ -13,10 +14,12 @@ from std_srvs.srv import Trigger
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from pylon_interfaces.msg import (
     ControlAuthorityCommand, ControlAuthorityState, FlightControlCommand,
-    FlightState, EngineCommand, EngineState, SeparationCommand, SeparationState,
-    VesselLifecycle,
+    EngineCommand, SeparationCommand, SeparationResult, SimulatorState,
+    ControlBatch, ControlSnapshot, VesselLifecycle,
 )
+from pylon_interfaces.srv import GetSeparationResult
 from pylon_vehicle_control.application.lease import LeaseCoordinator
+from pylon_vehicle_control.application.checkpoint import MissionCheckpoint, validate_resume
 from .mission import Config, Mission, Sample, Demand, Phase, attitude_inputs, dot
 
 
@@ -73,6 +76,12 @@ class ReusableMissionNode(LifecycleNode):
         self.separation_deadline = 0.
         self.rebinding = False
         self.coast_hold = None
+        self.simulator = None
+        self.simulator_seen = 0.
+        self.pending_operation = None
+        self.separation_result = None
+        self.next_result_query = 0.
+        self.result_query_future = None
         root = '/ksp_vessel'
         durable = QoSProfile(depth=10, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.status_pub = self.create_publisher(String, '~/status', durable)
@@ -81,14 +90,13 @@ class ReusableMissionNode(LifecycleNode):
         # The final zero command and release must be sent before deactivation
         # disables these lifecycle publishers.
         self.authority_pub = self.create_lifecycle_publisher(ControlAuthorityCommand, root+'/control/authority/command', 10)
-        self.engine_pub = self.create_lifecycle_publisher(EngineCommand, root+'/actuators/propulsion/command', 10)
-        self.flight_pub = self.create_lifecycle_publisher(FlightControlCommand, root+'/control/flight_command', 10)
-        self.separation_pub = self.create_lifecycle_publisher(SeparationCommand, root+'/actuators/separation/command', 10)
+        self.batch_pub = self.create_lifecycle_publisher(ControlBatch, root+'/control/batch', 10)
         self.create_subscription(VesselLifecycle, root+'/lifecycle', self.on_vessel, durable)
         self.create_subscription(ControlAuthorityState, root+'/control/authority/state', self.on_authority, durable)
-        self.create_subscription(FlightState, root+'/ground_truth/flight', self.on_flight, qos_profile_sensor_data)
-        self.create_subscription(EngineState, root+'/actuators/propulsion/state', self.on_engine, qos_profile_sensor_data)
-        self.create_subscription(SeparationState, root+'/actuators/separation/state', self.on_separation, durable)
+        self.create_subscription(ControlSnapshot, root+'/control/snapshot', self.on_snapshot, qos_profile_sensor_data)
+        self.create_subscription(SimulatorState, root+'/simulator/state', self.on_simulator, durable)
+        self.create_subscription(SeparationResult, root+'/actuators/separation/result', self.on_separation_result, durable)
+        self.result_client = self.create_client(GetSeparationResult, root+'/actuators/separation/get_result')
         self.create_service(Trigger, '~/abort', self.on_abort_request)
         self.create_timer(.05, self.tick)
 
@@ -118,6 +126,8 @@ class ReusableMissionNode(LifecycleNode):
             return 'unexpected_vessel_name'
         if not self.flight or self.flight.vessel_id != self.lease.vessel_id or now-self.flight_seen > timeout:
             return 'waiting_for_flight_state'
+        if self.simulator_issue(now):
+            return 'waiting_for_advancing_simulator'
         if self.flight.body_name != 'Kerbin' or not self.flight.landed or self.flight.splashed:
             return 'requires_Kerbin_launchpad'
         if self.flight.liquid_fuel <= 0 or self.flight.oxidizer <= 0 or self.flight.electric_charge < 5:
@@ -146,6 +156,7 @@ class ReusableMissionNode(LifecycleNode):
                                  and now-seen < self.get_parameter('telemetry_timeout').value)
         self.active, self.ever_owned = True, False
         self.pending_separation = ''
+        self.pending_operation = self.separation_result = None
         self.rebinding = False
         self.next_clamp_release = 0.
         self.activation_time = now
@@ -199,6 +210,95 @@ class ReusableMissionNode(LifecycleNode):
             self.engines.clear()
             self.separators.clear()
             self.authority = None
+            self.simulator = None
+
+    def on_snapshot(self, message):
+        life = self.lifecycle
+        if life is None:
+            return
+        flight = message.flight
+        identity = lambda item: (item.runtime_instance, item.runtime_epoch, item.runtime_generation,
+                                 item.vessel_id, item.observation_sequence)
+        if identity(flight)[:4] != (life.runtime_instance, life.runtime_epoch, life.runtime_generation, life.vessel_id):
+            return
+        if any(identity(item) != identity(flight) for item in (*message.engines, *message.separations)):
+            return
+        if self.flight is not None and flight.observation_sequence <= self.flight.observation_sequence:
+            return
+        self.on_flight(flight)
+        now = self.flight_seen
+        self.engines = {item.id: (item, now) for item in message.engines}
+        self.separators = {item.id: (item, now) for item in message.separations}
+
+    def on_simulator(self, message):
+        life = self.lifecycle
+        if life is None or (message.runtime_instance, message.runtime_epoch, message.vessel_id) != (
+                life.runtime_instance, life.runtime_epoch, life.vessel_id):
+            return
+        self.simulator, self.simulator_seen = message, time.monotonic()
+
+    def simulator_issue(self, now):
+        simulator = self.simulator
+        timeout = self.get_parameter('telemetry_timeout').value
+        if simulator is None or now-self.simulator_seen > timeout or not simulator.communication_alive:
+            return 'simulator_communication_stale'
+        if simulator.paused:
+            return 'simulator_paused'
+        if simulator.warp_rate != 1.:
+            return 'simulator_warping'
+        if simulator.packed or not simulator.control_available:
+            return 'simulator_control_unavailable'
+        if simulator.state == SimulatorState.STATE_STALLED:
+            return 'simulation_stalled'
+        return ''
+
+    def on_separation_result(self, result):
+        operation = self.pending_operation
+        if operation is None:
+            return
+        if (result.operation_id, result.original_runtime_instance, result.original_runtime_epoch,
+                result.original_vessel_id) != (operation.operation_id, operation.original_runtime_instance,
+                operation.original_runtime_epoch, operation.original_vessel_id):
+            return
+        if not result.retained and result.reason == 'result_not_retained':
+            # A read query uses another DDS path and can arrive before the batch
+            # that creates this receipt. Absence is unresolved until the deadline.
+            return
+        if not result.retained or result.id != operation.id or result.controller_id != self.lease.controller_id:
+            self.stop('separation_result_unavailable_or_conflicting')
+            return
+        if result.completed and not result.success:
+            self.stop('separation_failed:'+result.reason)
+            return
+        if self.separation_result is None or not self.separation_result.completed:
+            self.separation_result = result
+
+    def query_separation_result(self, now):
+        if self.pending_operation is None or now < self.next_result_query:
+            return
+        if self.result_query_future is not None and not self.result_query_future.done():
+            return
+        if not self.result_client.service_is_ready():
+            return
+        self.next_result_query = now+.25
+        request = GetSeparationResult.Request()
+        for field in ('operation_id', 'original_runtime_instance', 'original_runtime_epoch', 'original_vessel_id'):
+            setattr(request, field, getattr(self.pending_operation, field))
+        self.result_query_future = self.result_client.call_async(request)
+        self.result_query_future.add_done_callback(
+            lambda future, operation_id=request.operation_id: self.received_result_query(future, operation_id))
+
+    def received_result_query(self, future, operation_id):
+        if self.pending_operation is None or self.pending_operation.operation_id != operation_id:
+            return
+        try:
+            response = future.result()
+            if response.found:
+                self.on_separation_result(response.result)
+            # A negative lookup can precede acceptance of the original command.
+            # Keep querying within separation_deadline rather than infer failure.
+        except Exception as exc:
+            self.get_logger().warning(f'Separation result query failed: {exc}')
 
     def on_authority(self, message):
         if message.vessel_id != self.lease.vessel_id:
@@ -207,9 +307,10 @@ class ReusableMissionNode(LifecycleNode):
         lost = self.lease.observe_authority(message.vessel_id, message.controller_id, message.lease_id,
                                             message.state == message.STATE_OWNED)
         if lost and self.active and self.coast_hold is None and not (self.pending_separation and time.monotonic() < self.separation_deadline):
+            issue = self.simulator_issue(time.monotonic())
             if not (message.state == ControlAuthorityState.STATE_UNOWNED
-                    and message.reason == 'lease_expired' and self.hold_orbit(time.monotonic())):
-                self.stop('authority_lost')
+                    and message.reason == 'lease_expired' and self.hold_orbit(time.monotonic(), issue or 'orbital_telemetry_hold')):
+                self.stop(issue or 'authority_lost')
 
     def on_flight(self, message):
         if message.vessel_id != self.lease.vessel_id:
@@ -246,10 +347,27 @@ class ReusableMissionNode(LifecycleNode):
         message.suppress_sas = True
         self.authority_pub.publish(message)
 
-    def publish_demand(self, demand, thrust, s):
+    def new_separation(self, actuator_id):
+        command = SeparationCommand()
+        command.id, command.separate = actuator_id, True
+        command.operation_id = uuid.uuid4().hex
+        command.original_runtime_instance = self.lifecycle.runtime_instance
+        command.original_runtime_epoch = self.lifecycle.runtime_epoch
+        command.original_vessel_id = self.lease.vessel_id
+        self.pending_operation = command
+        self.separation_result = None
+        self.pending_separation = actuator_id
+        self.separation_deadline = time.monotonic()+5.
+        self.next_result_query = 0.
+        return command
+
+    def publish_demand(self, demand, thrust, s, renew=False):
+        batch = self.identify(ControlBatch())
+        batch.renew_lease = renew
+        batch.lease_duration_sec = 1.
+        batch.suppress_sas = True
         # Release supports only after measured thrust exceeds vehicle weight.
-        # One clamp per tick avoids racing several commands against the shared
-        # authority sequence. A still-attached clamp can be retried safely.
+        # Flight inputs, propulsion, and the final release share one transaction.
         now = time.monotonic()
         engine_state = self.engines.get(self.engine_id, (None, 0.))[0]
         if (self.mission.phase == Phase.IGNITION and not self.pending_separation and engine_state is not None
@@ -257,34 +375,36 @@ class ReusableMissionNode(LifecycleNode):
             for key, (clamp, seen) in self.separators.items():
                 if (clamp.mechanism == 'launch_clamp' and clamp.available and not clamp.separated
                         and now-seen < self.get_parameter('telemetry_timeout').value):
-                    release = self.identify(SeparationCommand())
-                    release.id, release.separate = key, True
-                    self.separation_pub.publish(release)
-                    self.pending_separation = key
-                    self.separation_deadline = now+3.
+                    batch.has_separation = True
+                    batch.separation = self.new_separation(key)
                     self.next_clamp_release = now+.2
-                    return
-        if demand.separate:
-            separation = self.identify(SeparationCommand())
-            separation.id = self.separator_id
-            separation.separate = True
-            self.separation_pub.publish(separation)
-            self.pending_separation = self.separator_id
-            self.separation_deadline = now+3.
-            return
-        command = self.identify(FlightControlCommand())
+                    break
+        if demand.separate and not self.pending_operation:
+            batch.has_separation = True
+            batch.separation = self.new_separation(self.separator_id)
+        command = FlightControlCommand()
         command.pitch, command.yaw, command.roll = attitude_inputs(demand.direction, s.angular_velocity, self.config, s.dynamic_pressure)
         command.landing_gear = demand.gear
         command.timeout_sec = .3
-        self.flight_pub.publish(command)
-        engine = self.identify(EngineCommand())
+        batch.has_flight, batch.flight = True, command
+        engine = EngineCommand()
         engine.id = self.engine_id
         engine.enabled = True
         # Avoid accelerating the wrong way during coast/flip manoeuvres.
         aligned = dot(demand.direction, (1., 0., 0.)) > .9
         engine.target_thrust = thrust*demand.throttle if aligned else 0.
         engine.timeout_sec = .3
-        self.engine_pub.publish(engine)
+        batch.engines = [engine]
+        self.batch_pub.publish(batch)
+
+    def send_zero_batch(self, landing_gear=False):
+        batch = self.identify(ControlBatch())
+        batch.has_flight = True
+        batch.flight.landing_gear, batch.flight.timeout_sec = landing_gear, .3
+        engine = EngineCommand()
+        engine.id, engine.enabled, engine.target_thrust, engine.timeout_sec = self.engine_id, True, 0., .3
+        batch.engines = [engine]
+        self.batch_pub.publish(batch)
 
     def stop(self, reason):
         if self.active:
@@ -292,12 +412,7 @@ class ReusableMissionNode(LifecycleNode):
             if self.lease.owned:
                 # No attitude impulse during cutoff. KSP enforces its own
                 # timeout even if the final UDP packet cannot be delivered.
-                engine = self.identify(EngineCommand())
-                engine.id, engine.enabled, engine.target_thrust, engine.timeout_sec = self.engine_id, True, 0., .3
-                self.engine_pub.publish(engine)
-                command = self.identify(FlightControlCommand())
-                command.landing_gear, command.timeout_sec = True, .3
-                self.flight_pub.publish(command)
+                self.send_zero_batch(landing_gear=True)
                 self.send_authority('release')
                 self.lease.owned = False
             self.active = False
@@ -308,35 +423,58 @@ class ReusableMissionNode(LifecycleNode):
         response.success, response.message = True, 'Actuation stopped; cleanup/configure required before another flight.'
         return response
 
-    def hold_orbit(self, now):
+    def hold_orbit(self, now, reason='orbital_telemetry_hold'):
         f = self.flight
         # Only an already established, unpowered orbit can wait for a simulator
         # frame stall. Powered flight and atmospheric descent still abort.
-        if (self.mission.phase != Phase.DEORBIT_WAIT or f is None
-                or min(f.altitude_asl, f.periapsis) < 70000. or f.dynamic_pressure != 0.):
+        engine = self.engines.get(self.engine_id, (None, 0.))[0]
+        if (self.mission.phase != Phase.DEORBIT_WAIT or f is None or self.pending_operation is not None
+                or min(f.altitude_asl, f.periapsis) < 70000. or f.dynamic_pressure != 0.
+                or engine is None or engine.throttle > .001 or engine.thrust > 1.):
             return False
-        self.coast_hold = dict(started=now, fuel=f.liquid_fuel, mass=f.mass,
-                               ready_since=None, acquiring=False)
-        self.mission.transition(Phase.HOLD, f.universal_time, 'orbital_telemetry_hold')
+        try:
+            checkpoint = MissionCheckpoint.capture(f, self.simulator,
+                [item[0] for item in self.engines.values()], [item[0] for item in self.separators.values()],
+                self.authority)
+        except ValueError as exc:
+            self.get_logger().warning(f'Cannot capture safe orbital hold: {exc}')
+            return False
+        self.coast_hold = dict(started=now, checkpoint=checkpoint,
+                               ready_since=None, acquiring=False,
+                               timeout=300. if reason == 'simulator_paused' else 5.,
+                               reason=reason)
+        self.mission.transition(Phase.HOLD, f.universal_time, reason)
         if self.lease.owned:
             # These are explicit zeros, not renewed flight demands. The normal
             # actuator/lease watchdogs remain in force throughout the hold.
-            engine = self.identify(EngineCommand())
-            engine.id, engine.enabled, engine.target_thrust, engine.timeout_sec = self.engine_id, True, 0., .3
-            self.engine_pub.publish(engine)
-            command = self.identify(FlightControlCommand())
-            command.timeout_sec = .3
-            self.flight_pub.publish(command)
+            self.send_zero_batch()
             self.send_authority('release')
         self.lease.owned = self.ever_owned = False
         return True
 
     def recover_orbit(self, now):
         hold = self.coast_hold
-        if now-hold['started'] > 5.:
+        issue = self.simulator_issue(now)
+        if issue == 'simulator_paused' and hold['reason'] != 'simulator_paused':
+            # The pause heartbeat can arrive after an engine/authority freshness
+            # guard. Give the same proven pause the same bound in either order.
+            hold['timeout'], hold['reason'] = 300., 'simulator_paused'
+            hold.pop('communication_lost_at', None)
+            self.mission.transition(Phase.HOLD, self.flight.universal_time, 'simulator_paused')
+        if now-hold['started'] > hold['timeout']:
             self.stop('orbital_telemetry_hold_expired')
             return
         timeout = self.get_parameter('telemetry_timeout').value
+        if issue:
+            hold['ready_since'] = None
+            # An explicit pause can wait; losing communication during that pause
+            # uses the short communications bound, not the operator pause bound.
+            if issue != 'simulator_paused':
+                hold['communication_lost_at'] = hold.get('communication_lost_at', now)
+                if now-hold['communication_lost_at'] > 5.:
+                    self.stop('orbital_communication_hold_expired')
+            return
+        hold.pop('communication_lost_at', None)
         engine, engine_seen = self.engines.get(self.engine_id, (None, 0.))
         fresh = (self.flight is not None and self.authority is not None and engine is not None
                  and max(now-self.flight_seen, now-self.lifecycle_seen,
@@ -345,19 +483,23 @@ class ReusableMissionNode(LifecycleNode):
             hold['ready_since'] = None
             return
         f = self.flight
-        if (min(f.altitude_asl, f.periapsis) < 70000. or f.dynamic_pressure != 0.
-                or abs(f.liquid_fuel-hold['fuel']) > .2 or abs(f.mass-hold['mass']) > 5.
-                or engine.flameout or engine.throttle > .001 or engine.thrust > 1.):
-            self.stop('orbital_hold_state_changed')
+        validation = validate_resume(hold['checkpoint'], f, self.simulator,
+            [item[0] for item in self.engines.values()], [item[0] for item in self.separators.values()],
+            self.authority, now_monotonic=now,
+            received_at=min(self.flight_seen, self.simulator_seen, self.authority_seen,
+                *(item[1] for item in self.engines.values()), *(item[1] for item in self.separators.values())),
+            max_sample_age_sec=timeout,
+            allowed_controller_id=self.lease.controller_id if hold['acquiring'] else '',
+            allowed_lease_id=self.lease.lease_id if hold['acquiring'] else '')
+        if not validation.allowed:
+            if validation.reason in ('telemetry_stale', 'fresh_post_checkpoint_observation_required',
+                                     'observation_time_mismatch', 'simulator_not_advancing', 'authority_not_released'):
+                hold['ready_since'] = None
+                return
+            self.get_logger().warning(f'Orbital resume rejected: {validation.reason}')
+            self.stop('orbital_hold_authority_conflict' if validation.reason == 'authority_conflict'
+                      else 'orbital_hold_state_changed')
             return
-        if self.authority.state != ControlAuthorityState.STATE_UNOWNED:
-            # Allow the old lease's release acknowledgment to arrive first.
-            if (not hold['acquiring'] and self.authority.controller_id == self.lease.controller_id
-                    and self.authority.lease_id == self.lease.lease_id):
-                return
-            if not (hold['acquiring'] and self.lease.owned):
-                self.stop('orbital_hold_authority_conflict')
-                return
         hold['ready_since'] = hold['ready_since'] or now
         if now-hold['ready_since'] < .5:
             return
@@ -382,31 +524,45 @@ class ReusableMissionNode(LifecycleNode):
         if self.coast_hold is not None:
             self.recover_orbit(now)
             return
-        if self.pending_separation and now > self.separation_deadline:
-            self.stop('separation_epoch_not_confirmed')
-            return
-        if self.rebinding:
-            receipt, seen = self.separators.get(self.pending_separation, (None, 0.))
+        if self.pending_operation is not None:
             if now > self.separation_deadline:
-                self.stop('separation_epoch_not_confirmed')
+                self.stop('separation_result_not_confirmed')
                 return
-            if (receipt is None or not receipt.separated or self.flight is None
-                    or self.engine_id not in self.engines or self.authority is None):
+            self.query_separation_result(now)
+            receipt = self.separation_result
+            if receipt is not None and receipt.completed:
+                if not receipt.success:
+                    self.stop('separation_failed:'+receipt.reason)
+                    return
+                life = self.lifecycle
+                if receipt.result_runtime_generation > life.runtime_generation:
+                    return  # Result arrived before its session heartbeat.
+                if (receipt.result_runtime_epoch != life.runtime_epoch
+                        or receipt.result_runtime_generation != life.runtime_generation
+                        or life.vessel_id not in receipt.resulting_vessel_ids):
+                    self.stop('separation_result_session_mismatch')
+                    return
+                if (self.flight is None or self.engine_id not in self.engines
+                        or self.authority is None or self.simulator is None):
+                    return
+                if self.pending_separation == self.separator_id:
+                    self.mission.separation_confirmed = True
+                self.rebinding = False
+                self.pending_separation = ''
+                self.pending_operation = None
+                self.get_logger().info('Separation receipt verified against the current flight session')
+            elif self.rebinding or not self.lease.owned:
                 return
-            if self.pending_separation == self.separator_id:
-                self.mission.separation_confirmed = True
-            self.rebinding = False
-            self.pending_separation = ''
-            self.get_logger().info('Separation confirmed; acquiring a fresh control lease')
-        elif self.pending_separation and not self.lease.owned:
-            if now > self.separation_deadline:
-                self.stop('separation_epoch_not_confirmed')
-            return
         timeout = self.get_parameter('telemetry_timeout').value
+        issue = self.simulator_issue(now)
+        if issue:
+            if not self.hold_orbit(now, issue):
+                self.stop(issue)
+            return
         if (self.flight is None or now-self.flight_seen > timeout or now-self.lifecycle_seen > timeout
                 or now-self.progress_seen > 2.):
             if not self.hold_orbit(now):
-                self.stop('telemetry_stale_or_simulation_paused')
+                self.stop('control_snapshot_stale' if now-self.flight_seen > timeout else 'simulation_not_progressing')
             return
         engine, seen = self.engines.get(self.engine_id, (None, 0.))
         if engine is None or now-seen > timeout or (engine.flameout and self.ever_owned):
@@ -424,11 +580,8 @@ class ReusableMissionNode(LifecycleNode):
             self.stop('authority_acquisition_timeout')
             return
         action = self.lease.due_action(now)
-        if action:
+        if action and action.action == 'acquire':
             self.send_authority(action.action)
-            # DDS does not order different topics. Reserve this tick for the
-            # lease heartbeat so a newer actuator sequence cannot overtake it.
-            # The 50 ms gap remains within the 300 ms actuator watchdog.
             return
         if not self.lease.owned:
             return
@@ -437,12 +590,11 @@ class ReusableMissionNode(LifecycleNode):
         try:
             if self.mission.phase == Phase.READY:
                 self.mission.start(s)
-            separated = self.separators.get(self.separator_id, (None, 0.))[0]
-            demand = self.mission.step(s, engine.max_thrust, bool(separated and separated.separated))
+            demand = self.mission.step(s, engine.max_thrust, self.mission.separation_confirmed)
             if self.mission.terminal:
                 self.stop(self.mission.reason)
                 return
-            self.publish_demand(demand, engine.max_thrust, s)
+            self.publish_demand(demand, engine.max_thrust, s, renew=bool(action))
         except (ValueError, ArithmeticError) as exc:
             self.get_logger().error(str(exc))
             self.stop('invalid_flight_state')

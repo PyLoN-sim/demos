@@ -7,6 +7,7 @@ sensor-derived navigation solution.
 from dataclasses import dataclass
 from enum import Enum
 import math
+from pylon_vehicle_control.application.flight_axes import stock_inputs_for_body_axes
 
 
 def clip(value, low, high):
@@ -428,4 +429,4 @@ def attitude_inputs(direction, angular_velocity, config, dynamic_pressure=0.):
     # Positive stock flight inputs generate negative vessel-local angular
     # acceleration. Combine that with the axial-vector handedness conversion;
     # confirmed against KSP flight telemetry on all three axes.
-    return -torque[1], -torque[2], torque[0]
+    return stock_inputs_for_body_axes(torque)
