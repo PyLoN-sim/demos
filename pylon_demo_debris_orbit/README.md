@@ -26,7 +26,7 @@ IMU ─ ジャイロ積分・比力予測 ─┘               │              
 
 ## 実機の準備と起動
 
-全6軸を操作できるRCS、3D LiDAR（Sensor ID `front_lidar`）、LiDARと同方向を向くカメラ（`orbit_camera`）を搭載します。センサー取付位置・姿勢は、機体内のTFから取得します。
+使用済みのデモ機体を[`craft/PyLoN Debris Orbiter.craft`](craft/PyLoN%20Debris%20Orbiter.craft)に同梱しています。[コピー・読み込み手順](craft/README.md)に従い、セーブの`Ships/VAB/`へコピーしてVABで **PyLoN Debris Orbiter** を開いてください。RCS、3D LiDAR（`front_lidar`）、同方向を向くカメラ（`orbit_camera`）、分離するタンク・エンジンを搭載済みです。センサー取付位置・姿勢は機体内のTFから取得します。
 
 [起動手順](https://github.com/PyLoN-sim/docs/blob/main/guide/getting-started.md)に従ってビルド・同期し、KSPの通常操作で機体を開いてください。
 
@@ -39,7 +39,7 @@ ros2 run pylon_bridge udp_bridge \
   --host 127.0.0.1 --port 49010 --disable-ground-truth
 ```
 
-KSPの通常操作で軌道投入・分離を行い、機体の状態が安定したら別ターミナルでデモを起動します。
+同梱機体は軌道上の試験用です。KSP標準のデバッグメニューで高度約100 kmのKerbin円軌道へ配置するか、別途打ち上げ手段を用意します。エンジン停止後、デカプラーの右クリックメニューで対象を分離してください。機体の状態が安定したら別ターミナルでデモを起動します。
 
 ```bash
 source /opt/ros/jazzy/setup.bash
