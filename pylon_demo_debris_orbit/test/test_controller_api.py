@@ -21,7 +21,6 @@ class ControllerApiTests(unittest.TestCase):
         self.context = Context()
         rclpy.init(context=self.context, domain_id=174)
         self.node = ThrustController(context=self.context)
-        self.node.authority_publisher = Mock()
         self.node.wrench_publisher = Mock()
         self.node.status_publisher = Mock()
         self.life = VesselLifecycle(vessel_id="chaser", generation=4, origin_sequence=7, state=1)
@@ -51,7 +50,6 @@ class ControllerApiTests(unittest.TestCase):
         n.mode_started = n.get_clock().now() - Duration(seconds=4)
 
     def owned(self):
-        self.node._maintain_authority(self.node.get_clock().now())
         # These producer IDs deliberately belong to a different PyLoN node.
         message = ControlAuthorityState(vessel_id="chaser", generation=4,
             controller_id="different_producer", lease_id="another_stream", state=1)
@@ -61,7 +59,7 @@ class ControllerApiTests(unittest.TestCase):
     def last_state(self):
         return json.loads(self.node.status_publisher.publish.call_args.args[0].data)["state"]
 
-    def test_current_api_uses_shared_owner_and_bridge_managed_numbering(self):
+    def test_ksp_switch_enables_wrench_without_authority_commands(self):
         self.inputs()
         self.owned()
         self.node.control()
@@ -71,25 +69,24 @@ class ControllerApiTests(unittest.TestCase):
         self.assertEqual((command.controller_id, command.lease_id, command.sequence), ("", "", 0))
         self.assertEqual(command.header.frame_id, "base_link")
         self.assertGreater(command.wrench.force.x, 0)
-        acquire = self.node.authority_publisher.publish.call_args.args[0]
-        self.assertEqual((acquire.controller_id, acquire.lease_id, acquire.sequence), ("", "", 0))
+        self.assertFalse(hasattr(self.node, "authority_publisher"))
 
     def test_stale_generation_cannot_grant_control(self):
         self.inputs()
         self.node.receive_authority(ControlAuthorityState(vessel_id="chaser", generation=3, state=1))
         self.node.control()
         self.node.wrench_publisher.publish.assert_not_called()
-        self.assertEqual(self.last_state(), "waiting_for_control_authority")
+        self.assertEqual(self.last_state(), "waiting_for_ros2_control_on")
 
-    def test_sensor_loss_zeros_releases_and_latches_until_restart(self):
+    def test_sensor_loss_zeros_and_latches_until_restart(self):
         self.inputs()
         self.owned()
+        self.node.control()
         self.node.pose_received -= Duration(seconds=2)
         self.node.control()
         self.assertEqual(self.last_state(), "control_interrupted")
         command = self.node.wrench_publisher.publish.call_args.args[0]
         self.assertEqual(command.wrench.force.x, 0)
-        self.assertEqual(self.node.authority_publisher.publish.call_args.args[0].action, 3)
         self.inputs(mode=ControlSetpoint.MODE_IDLE)
         self.inputs()
         self.assertTrue(self.node.control_interrupted)
@@ -98,33 +95,33 @@ class ControllerApiTests(unittest.TestCase):
     def test_silent_authority_loss_is_a_latched_stop(self):
         self.inputs()
         self.owned()
+        self.node.control()
         self.node.authority_received -= Duration(seconds=2)
         self.node.control()
         self.assertEqual(self.last_state(), "control_interrupted")
-        self.assertFalse(self.node.lease.owned)
+        self.assertFalse(self.node.commanding)
 
-    def test_shared_authority_loss_does_not_reacquire(self):
+    def test_ksp_switch_off_latches_stop(self):
         self.inputs()
         message = self.owned()
+        self.node.control()
         message.state = message.STATE_PLAYER
         self.node.receive_authority(message)
         self.node.control()
         self.assertTrue(self.node.control_interrupted)
-        actions = [call.args[0].action for call in self.node.authority_publisher.publish.call_args_list]
-        self.assertEqual(actions, [1, 3])
+        self.assertFalse(hasattr(self.node, "authority_publisher"))
 
-    def test_idle_does_not_cancel_another_nodes_authority(self):
+    def test_idle_does_not_send_commands(self):
         self.node.receive_authority(ControlAuthorityState(vessel_id="chaser", generation=4, state=1))
         self.node.control()
         self.node.stop()
-        self.node.authority_publisher.publish.assert_not_called()
         self.node.wrench_publisher.publish.assert_not_called()
 
-    def test_shutdown_cancels_unacknowledged_acquire(self):
+    def test_shutdown_while_switch_off_sends_no_command(self):
         self.inputs()
         self.node.control()
         self.node.stop()
-        self.assertEqual(self.node.authority_publisher.publish.call_args.args[0].action, 3)
+        self.node.wrench_publisher.publish.assert_not_called()
 
     def test_continuous_limit_feedback_from_bridge_stream_starts_zero_cooldown(self):
         self.inputs()
@@ -142,7 +139,19 @@ class ControllerApiTests(unittest.TestCase):
         self.node.receive_lifecycle(self.life)
         self.assertTrue(self.node.control_interrupted)
         self.assertIsNone(self.node.pose)
-        self.assertFalse(self.node.lease.owned)
+        self.assertFalse(self.node.commanding)
+
+    def test_shutdown_zeros_wrench_and_preserves_ksp_switch(self):
+        self.inputs()
+        self.owned()
+        self.node.control()
+        self.node.stop()
+        command = self.node.wrench_publisher.publish.call_args.args[0]
+        self.assertEqual(command.wrench.force.x, 0.0)
+        self.assertEqual(command.wrench.torque.z, 0.0)
+        self.assertTrue(self.node.control_enabled)
+        self.assertFalse(self.node.commanding)
+        self.assertFalse(hasattr(self.node, "authority_publisher"))
 
     def test_nan_velocity_and_zero_quaternion_are_rejected(self):
         self.inputs()

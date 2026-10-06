@@ -206,10 +206,10 @@ class DebrisOrbitNode(Node):
             "body_frame": "base_link",
             "orbit_radius": 15.0,
             "max_position_step": 2.0,
-            "angular_speed_deg_s": 1.0,
+            "angular_speed_deg_s": 6.0,
             "orbit_direction": 1,
             "orbit_plane_normal": [0.0, 0.0, 1.0],
-            "detumble_enter_rate_deg_s": 6.0,
+            "detumble_enter_rate_deg_s": 12.0,
             "detumble_exit_rate_deg_s": 2.0,
             "search_start_delay_sec": 0.3,
             "search_yaw_amplitude_deg": 180.0,
@@ -341,8 +341,10 @@ class DebrisOrbitNode(Node):
         return subtract(target, sensor_position)
 
     def receive_image(self, message: Image) -> None:
-        if self.pending_capture is None or self.complete:
+        if self.complete:
             return
+        # Camera packets can arrive before navigation reaches their timestamp.
+        # Retain a short history even before the next angle trigger is armed.
         self.capture_images.append(message)
         self._try_capture_image()
 
@@ -357,7 +359,7 @@ class DebrisOrbitNode(Node):
             for left, right in zip(self.angle_history, list(self.angle_history)[1:]):
                 if left[0] <= stamp <= right[0] and right[0] > left[0]:
                     measured_angle = left[1] + (right[1]-left[1])*(stamp-left[0])/(right[0]-left[0])
-                    if 0 <= measured_angle-angle <= self.capture_tolerance:
+                    if abs(measured_angle - angle) <= self.capture_tolerance:
                         selected = message
                     break
             if selected is not None:
@@ -633,10 +635,11 @@ class DebrisOrbitNode(Node):
             self.capture_images.clear()
         if self.pending_capture is not None or self.complete:
             return
-        if self.actual_angle >= self.next_capture_angle and allow_capture:
+        if self.actual_angle >= self.next_capture_angle - self.capture_tolerance and allow_capture:
             self.pending_capture = (self.capture_sequence, self.next_capture_angle)
             self.capture_sequence += 1
             self.next_capture_angle += self.capture_step
+            self._try_capture_image()
 
     def _state_is_fresh(self, now: Time) -> bool:
         return bool(

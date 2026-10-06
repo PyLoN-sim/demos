@@ -143,6 +143,46 @@ class RelativeContractTests(unittest.TestCase):
             self.assertEqual(node.saved_captures, 11)
             self.assertEqual(len(list(Path(directory).glob('*.png'))), 1)
 
+    def test_image_arriving_before_navigation_trigger_is_captured_at_its_time(self):
+        node = self.guidance
+        node.basis_u, node.basis_v = (1.,0.,0.), (0.,1.,0.)
+        node.actual_angle = math.radians(35.)
+        node.next_capture_angle = math.radians(36.)
+        node.angle_history.append((100_000_000_000, node.actual_angle))
+        image = Image(height=1,width=1,encoding='rgb8',step=3,data=[7,8,9])
+        image.header.stamp.sec = 100
+        image.header.stamp.nanosec = 250_000_000
+        node.receive_image(image)
+        self.assertEqual(node.saved_captures, 0)
+        pose = PoseStamped()
+        pose.header.stamp.sec = 100
+        pose.header.stamp.nanosec = 500_000_000
+        pose.pose.orientation.w = 1.
+        node.receive_pose(pose)
+        with tempfile.TemporaryDirectory() as directory:
+            node.output_directory = Path(directory)
+            angle = math.radians(38.)
+            node._update_capture_progress((math.cos(angle), math.sin(angle), 0), (0,0,0))
+            self.assertEqual(node.saved_captures, 1)
+            metadata = json.loads(next(Path(directory).glob('*.json')).read_text())
+            self.assertAlmostEqual(metadata['requested_angle_deg'], 36.)
+            self.assertAlmostEqual(metadata['measured_angle_deg'], 36.5)
+
+    def test_capture_can_use_image_just_before_requested_angle(self):
+        node = self.guidance
+        node.pending_capture = (1, math.radians(36))
+        node.angle_history.extend([(100_000_000_000, math.radians(34)),
+                                   (101_000_000_000, math.radians(36))])
+        with tempfile.TemporaryDirectory() as directory:
+            node.output_directory = Path(directory)
+            image = Image(height=1,width=1,encoding='rgb8',step=3,data=[7,8,9])
+            image.header.stamp.sec = 100
+            image.header.stamp.nanosec = 500_000_000
+            node.receive_image(image)
+            self.assertEqual(node.saved_captures, 1)
+            metadata = json.loads(next(Path(directory).glob('*.json')).read_text())
+            self.assertAlmostEqual(metadata['measured_angle_deg'], 35.)
+
     def test_stale_image_is_not_mislabelled_as_current_angle(self):
         node = self.guidance
         node.pending_capture = (1, math.radians(36))

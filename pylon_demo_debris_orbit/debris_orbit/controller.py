@@ -1,4 +1,4 @@
-"""ROS adapter for source-tree force/attitude modules and shared PyLoN authority."""
+"""ROS adapter for source-tree force/attitude modules and KSP-enabled active-vessel control."""
 
 import json
 import math
@@ -7,7 +7,6 @@ from typing import Optional
 from geometry_msgs.msg import PoseStamped, TwistStamped
 from pylon_interfaces.msg import (
     BodyWrenchCommand,
-    ControlAuthorityCommand,
     ControlAuthorityState,
     ControlSetpoint,
     VesselLifecycle,
@@ -21,14 +20,13 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profi
 from rclpy.time import Time
 from std_msgs.msg import String
 
-from .authority import LeaseAction, SharedAuthority
 from .thrust import body_wrench_for_setpoint
 from .attitude import body_detumble_torque, rate_guard_body_torque
 from .core import Quaternion, Vector3, add, linear_ramp_fraction, scale
 
 
 class ThrustController(Node):
-    """Convert coherent world-frame setpoints into owned, body-frame wrench commands."""
+    """Convert coherent world-frame setpoints into body-frame wrench commands."""
 
     def __init__(self, **kwargs) -> None:
         super().__init__("pylon_demo_debris_orbit_controller", **kwargs)
@@ -39,7 +37,6 @@ class ThrustController(Node):
         body_twist_topic = self._string("body_twist_topic") or f"{prefix}/demos/debris_orbit/demo_vehicle/navigation/twist_body"
         setpoint_topic = self._string("setpoint_topic") or f"{prefix}/control/setpoint"
         wrench_topic = self._string("wrench_command_topic") or f"{prefix}/control/wrench_command"
-        authority_command_topic = self._string("authority_command_topic") or f"{prefix}/control/authority/command"
         authority_state_topic = self._string("authority_state_topic") or f"{prefix}/control/authority/state"
         lifecycle_topic = self._string("vessel_lifecycle_topic") or f"{prefix}/lifecycle"
         feedback_topic = self._string("wrench_feedback_topic") or f"{prefix}/control/wrench_feedback"
@@ -61,16 +58,12 @@ class ThrustController(Node):
         self.detumble_max_torque = self._positive("detumble_max_torque")
         self.command_ramp_sec = self._positive("command_ramp_sec")
         self.command_timeout_sec = self._positive("command_timeout_sec")
-        self.lease_duration_sec = self._positive("lease_duration_sec")
         self.authority_timeout = Duration(seconds=self._positive("authority_timeout_sec"))
         self.authority_received = None
-        self.authority_acquired = False
+        self.commanding = False
         self.stopping = False
         if not 0.05 <= self.command_timeout_sec <= 10.0:
             raise ValueError("command_timeout_sec must be within the PyLoN API range 0.05..10")
-        if self._positive("lease_renew_period_sec") >= self.lease_duration_sec:
-            raise ValueError("lease_renew_period_sec must be shorter than lease_duration_sec")
-        self.suppress_sas = bool(self.get_parameter("suppress_sas").value)
         self.state_timeout = Duration(seconds=self._positive("state_timeout_sec"))
         self.setpoint_timeout = Duration(seconds=self._positive("setpoint_timeout_sec"))
         self.extrapolate_setpoint = bool(self.get_parameter("extrapolate_setpoint").value)
@@ -91,9 +84,9 @@ class ThrustController(Node):
         self.safety_cooldown_until: Optional[Time] = None
         self.control_interrupted = False
         self.last_status = ""
-        self.lease = SharedAuthority(
-            self._positive("lease_renew_period_sec")
-        )
+        self.vessel_id = ""
+        self.generation = None
+        self.control_enabled = False
 
         command_qos = QoSProfile(depth=10)
         command_qos.reliability = ReliabilityPolicy.RELIABLE
@@ -104,9 +97,6 @@ class ThrustController(Node):
         status_qos.reliability = ReliabilityPolicy.RELIABLE
         status_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
         self.wrench_publisher = self.create_publisher(BodyWrenchCommand, wrench_topic, command_qos)
-        self.authority_publisher = self.create_publisher(
-            ControlAuthorityCommand, authority_command_topic, command_qos
-        )
         self.status_publisher = self.create_publisher(String, status_topic, status_qos)
         self.create_subscription(PoseStamped, pose_topic, self.receive_pose, qos_profile_sensor_data)
         self.create_subscription(TwistStamped, twist_topic, self.receive_twist, qos_profile_sensor_data)
@@ -125,7 +115,7 @@ class ThrustController(Node):
         )
         self.create_timer(1.0 / self._positive("control_rate_hz"), self.control)
         self.get_logger().info(
-            f"shared PyLoN authority setpoint={setpoint_topic} "
+            f"KSP ROS2 control setpoint={setpoint_topic} "
             f"wrench={wrench_topic} lifecycle={lifecycle_topic}"
         )
 
@@ -137,26 +127,22 @@ class ThrustController(Node):
             "body_twist_topic": "",
             "setpoint_topic": "",
             "wrench_command_topic": "",
-            "authority_command_topic": "",
             "authority_state_topic": "",
             "vessel_lifecycle_topic": "",
             "wrench_feedback_topic": "",
             "controller_status_topic": "",
             "world_frame": "pylon_debris_inertial",
             "body_frame": "base_link",
-            "lease_duration_sec": 2.0,
             "authority_timeout_sec": 1.0,
-            "lease_renew_period_sec": 0.5,
-            "suppress_sas": True,
             "command_timeout_sec": 0.25,
-            "position_kp": 500.0,
-            "velocity_kd": 2000.0,
-            "attitude_kp": 800.0,
+            "position_kp": 1000.0,
+            "velocity_kd": 3000.0,
+            "attitude_kp": 2000.0,
             "angular_kd": 4000.0,
             "max_force": 2000.0,
-            "max_torque": 250.0,
+            "max_torque": 500.0,
             "attitude_hold_max_torque": 150.0,
-            "attitude_hold_rate_limit_deg_s": 2.5,
+            "attitude_hold_rate_limit_deg_s": 10.0,
             "detumble_kd": 1000.0,
             "detumble_max_torque": 500.0,
             "command_ramp_sec": 3.0,
@@ -183,30 +169,27 @@ class ThrustController(Node):
             VesselLifecycle.STATE_ACTIVE,
             VesselLifecycle.STATE_CHANGED,
         )
-        previous_vessel = self.lease.vessel_id
-        if self.lease.observe_vessel(message.vessel_id, active, message.generation):
-            if previous_vessel:
+        vessel_id = message.vessel_id if active else ""
+        if (vessel_id, message.generation) != (self.vessel_id, self.generation):
+            if self.vessel_id:
                 self.control_interrupted = True
+            self.vessel_id, self.generation = vessel_id, message.generation
             self.pose = self.twist = self.body_twist = self.setpoint = None
             self.pose_received = self.twist_received = self.body_twist_received = self.setpoint_received = None
             self.authority_received = None
-            self.authority_acquired = False
+            self.control_enabled = False
+            self.commanding = False
 
     def receive_authority(self, message: ControlAuthorityState) -> None:
-        if (message.vessel_id, message.generation) != (self.lease.vessel_id, self.lease.generation):
+        # Observe the KSP switch only; the demo never acquires/renews/releases it.
+        if (message.vessel_id, message.generation) != (self.vessel_id, self.generation):
             return
         self.authority_received = self.get_clock().now()
-        lost = self.lease.observe_authority(
-            message.vessel_id,
-            message.state == ControlAuthorityState.STATE_PYLON and not message.emergency_stop,
-            generation=message.generation,
-        )
-
-        if lost and self.lease.requested:
+        enabled = message.state == ControlAuthorityState.STATE_PYLON and not message.emergency_stop
+        if self.commanding and not enabled:
             self.control_interrupted = True
             self.setpoint = None
-        if self.lease.owned and self.lease.requested:
-            self.authority_acquired = True
+        self.control_enabled = enabled
 
     def receive_pose(self, message: PoseStamped) -> None:
         if message.header.frame_id and message.header.frame_id != self.world_frame:
@@ -251,7 +234,7 @@ class ThrustController(Node):
 
     def receive_wrench_feedback(self, message: WrenchFeedback) -> None:
         if (
-            message.vessel_id == self.lease.vessel_id and self.lease.owned
+            message.vessel_id == self.vessel_id and self.control_enabled
             and "continuous_actuation_limit" in message.reason.split(",")
             and self.safety_cooldown_until is None
         ):
@@ -261,17 +244,18 @@ class ThrustController(Node):
         now = self.get_clock().now()
         if self.stopping:
             return
-        if self.authority_acquired and (self.authority_received is None or
+        if self.commanding and (self.authority_received is None or
                 now - self.authority_received > self.authority_timeout):
             self.control_interrupted = True
         if self.control_interrupted:
-            self._zero_and_release(now)
+            self._zero_command(now)
             self._publish_status("control_interrupted")
             return
         if not self._setpoint_requests_control(now):
             expired = (self.setpoint is not None and self.setpoint.mode != ControlSetpoint.MODE_IDLE)
-            self._zero_and_release(now)
-            if expired and self.authority_acquired:
+            was_commanding = self.commanding
+            self._zero_command(now)
+            if expired and was_commanding:
                 self.control_interrupted = True
                 self._publish_status("control_interrupted")
                 return
@@ -284,7 +268,7 @@ class ThrustController(Node):
             self._publish_status(state)
             return
         if not self._inputs_are_fresh(now):
-            self._zero_and_release(now)
+            self._zero_command(now)
             self.control_interrupted = True
             self.setpoint = None
             self.active_mode = ControlSetpoint.MODE_IDLE
@@ -292,22 +276,22 @@ class ThrustController(Node):
             self._publish_status("control_interrupted")
             return
         if self.safety_cooldown_until is not None:
-            self._maintain_authority(now)
             if now < self.safety_cooldown_until:
-                if self.lease.owned:
+                if self.control_enabled:
                     self._publish_wrench(now, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0))
                 self._publish_status("safety_cooldown")
                 return
             self.safety_cooldown_until = None
             self.mode_started = now
-        self._maintain_authority(now)
-        if not self.lease.owned:
+        if (not self.control_enabled or self.authority_received is None
+                or now - self.authority_received > self.authority_timeout):
             self._publish_status(
-                "waiting_for_control_authority",
-                vessel_id=self.lease.vessel_id,
+                "waiting_for_ros2_control_on",
+                vessel_id=self.vessel_id,
             )
             return
 
+        self.commanding = True
         assert (
             self.pose is not None
             and self.twist is not None
@@ -334,7 +318,7 @@ class ThrustController(Node):
             if self.extrapolate_setpoint:
                 dt = (Time.from_msg(self.pose.header.stamp) - Time.from_msg(desired.header.stamp)).nanoseconds * 1.0e-9
                 if abs(dt) > self.setpoint_timeout.nanoseconds * 1.0e-9:
-                    self._zero_and_release(now)
+                    self._zero_command(now)
                     self.control_interrupted = True
                     self._publish_status("control_interrupted", reason="setpoint_timestamp_mismatch")
                     return
@@ -376,43 +360,20 @@ class ThrustController(Node):
         self._publish_wrench(now, scale(force, ramp), scale(torque, ramp))
         self._publish_status(state, ramp=round(ramp, 2))
 
-    def _maintain_authority(self, now: Time) -> None:
-        action = self.lease.due_action(now.nanoseconds * 1.0e-9)
-        if action is not None:
-            self._publish_authority(action, now)
-
     @staticmethod
     def _finite_twist(message):
         v, w = message.twist.linear, message.twist.angular
         return all(math.isfinite(x) for x in (v.x,v.y,v.z,w.x,w.y,w.z))
 
-    def _zero_and_release(self, now):
-        if self.lease.owned and self.lease.requested:
+    def _zero_command(self, now):
+        if self.commanding and self.vessel_id:
             self._publish_wrench(now, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0))
-        self._release_authority(now)
+            self.commanding = False
 
     def stop(self):
         self.stopping = True
         if rclpy.ok(context=self.context):
-            self._zero_and_release(self.get_clock().now())
-
-    def _release_authority(self, now: Time) -> None:
-        action = self.lease.release_action()
-        if action is not None:
-            self._publish_authority(action, now)
-
-    def _publish_authority(self, action: LeaseAction, now: Time) -> None:
-        message = ControlAuthorityCommand()
-        message.header.stamp = now.to_msg()
-        message.action = {
-            "acquire": ControlAuthorityCommand.ACTION_ACQUIRE,
-            "renew": ControlAuthorityCommand.ACTION_RENEW,
-            "release": ControlAuthorityCommand.ACTION_RELEASE,
-        }[action.action]
-        message.vessel_id = action.vessel_id
-        message.lease_duration_sec = self.lease_duration_sec
-        message.suppress_sas = self.suppress_sas
-        self.authority_publisher.publish(message)
+            self._zero_command(self.get_clock().now())
 
     def _inputs_are_fresh(self, now: Time) -> bool:
         return bool(
@@ -461,7 +422,7 @@ class ThrustController(Node):
         message = BodyWrenchCommand()
         message.header.stamp = now.to_msg()
         message.header.frame_id = self.body_frame
-        message.vessel_id = self.lease.vessel_id
+        message.vessel_id = self.vessel_id
         message.wrench.force.x, message.wrench.force.y, message.wrench.force.z = force
         message.wrench.torque.x, message.wrench.torque.y, message.wrench.torque.z = torque
         message.timeout_sec = self.command_timeout_sec

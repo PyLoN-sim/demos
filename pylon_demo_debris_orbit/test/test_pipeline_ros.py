@@ -49,13 +49,7 @@ class PipelineRosTests(unittest.TestCase):
             cloud_pub = fixture.create_publisher(PointCloud2, "/ksp_vessel/lidar_3d/front_lidar/points", qos_profile_sensor_data)
             commands, actions = [], []
 
-            def authority(command):
-                actions.append(command)
-                state_pub.publish(ControlAuthorityState(vessel_id="synthetic_chaser", generation=7,
-                    state=0 if command.action == command.ACTION_RELEASE else 1,
-                    controller_id="bridge_default", lease_id="shared"))
-
-            fixture.create_subscription(ControlAuthorityCommand, "/ksp_vessel/control/authority/command", authority, 10)
+            fixture.create_subscription(ControlAuthorityCommand, "/ksp_vessel/control/authority/command", actions.append, 10)
             fixture.create_subscription(BodyWrenchCommand, "/ksp_vessel/control/wrench_command", commands.append, 10)
             # Sensor mount input is supplied without depending on a KSP model.
             mount = TransformStamped()
@@ -71,6 +65,7 @@ class PipelineRosTests(unittest.TestCase):
                 elapsed = time.monotonic() - started
                 if elapsed - last_life > 0.2:
                     life_pub.publish(life)
+                    state_pub.publish(ControlAuthorityState(vessel_id="synthetic_chaser", generation=7, state=1))
                     last_life = elapsed
                 imu = Imu(header=Header(stamp=fixture.get_clock().now().to_msg(), frame_id="base_link"))
                 imu_pub.publish(imu)
@@ -84,8 +79,7 @@ class PipelineRosTests(unittest.TestCase):
             self.assertGreaterEqual(recognition.observations, 3)
             self.assertIsNotNone(guidance.orbit_started)
             self.assertFalse(controller.control_interrupted)
-            self.assertTrue(any(cmd.action == cmd.ACTION_ACQUIRE for cmd in actions))
-            self.assertTrue(any(cmd.action == cmd.ACTION_RENEW for cmd in actions))
+            self.assertEqual(actions, [])
             self.assertTrue(any(abs(cmd.wrench.force.y) > 1.0 for cmd in commands))
             self.assertTrue(all(cmd.controller_id == "" and cmd.sequence == 0 for cmd in commands))
             for node in nodes[:3]:
@@ -97,7 +91,7 @@ class PipelineRosTests(unittest.TestCase):
             until = time.monotonic() + 0.3
             while time.monotonic() < until:
                 executor.spin_once(timeout_sec=0.01)
-            self.assertEqual(actions[-1].action, ControlAuthorityCommand.ACTION_RELEASE)
+            self.assertEqual(actions, [])
             self.assertEqual(commands[-1].wrench.force.x, 0.0)
             self.assertEqual(commands[-1].wrench.force.y, 0.0)
             self.assertEqual(commands[-1].wrench.torque.z, 0.0)

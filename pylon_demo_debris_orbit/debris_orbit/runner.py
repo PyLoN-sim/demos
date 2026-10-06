@@ -40,7 +40,7 @@ def parameter_sets(args):
     guidance, recognition, controller = (values[k] for k in ("guidance", "recognition", "controller"))
     for option, name in (("instance", "demo_instance_id"), ("prefix", "vessel_topic_prefix"),
                          ("lidar_sensor_id", "lidar_sensor_id"), ("camera_sensor_id", "camera_sensor_id"),
-                         ("orbit_radius", "orbit_radius"), ("lidar_frame", "lidar_frame")):
+                         ("orbit_radius", "orbit_radius"), ("angular_speed_deg_s", "angular_speed_deg_s"), ("lidar_frame", "lidar_frame")):
         value = getattr(args, option)
         if value is not None:
             guidance[name] = value
@@ -87,6 +87,7 @@ def parser():
     result.add_argument("--camera-sensor-id")
     result.add_argument("--lidar-frame")
     result.add_argument("--orbit-radius", type=float)
+    result.add_argument("--angular-speed-deg-s", type=float, help="orbit speed (default: 6 deg/s, about 60 seconds per orbit)")
     result.add_argument("--output-directory", type=Path)
     return result
 
@@ -142,7 +143,7 @@ def main():
     finally:
         for node in nodes:
             # Drain DDS while the ROS context is still alive. Normal Ctrl-C
-            # first stops guidance, then clears Wrench and releases authority.
+            # first stops guidance, then clears Wrench.
             if isinstance(node, DebrisOrbitNode):
                 node.enabled = False
             if isinstance(node, ThrustController):

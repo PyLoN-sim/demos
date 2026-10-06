@@ -48,7 +48,8 @@ ros2 run pylon_bridge udp_bridge \
 python3 pylon_demo_debris_orbit/run.py --no-enabled --no-controller --instance orbit_a --rviz
 ```
 
-確認用プロセスをCtrl-Cで終了し、機体を安定させてから制御を開始します。
+確認用プロセスをCtrl-Cで終了し、機体を安定させます。
+KSPのFlight画面で`ROS` → `ROS2 control ON`を選び、制御を開始します。
 
 ```bash
 python3 pylon_demo_debris_orbit/run.py --enabled --instance orbit_a --orbit-radius 15 --rviz
@@ -74,7 +75,7 @@ python3 pylon_demo_debris_orbit/run.py --enabled --instance orbit_a --orbit-radi
 | [`attitude.py`](debris_orbit/attitude.py) | LiDARの取付姿勢を考慮した目標姿勢、姿勢／角速度loop、デタンブルトルク |
 | [`thrust.py`](debris_orbit/thrust.py) | 位置・速度誤差から目標推力を計算し、body軸のWrenchへ組み立て |
 | [`guidance.py`](debris_orbit/guidance.py) | 探索→接近→周回の進行、軌道上の位置・速度目標、撮影 |
-| [`controller.py`](debris_orbit/controller.py)、[`authority.py`](debris_orbit/authority.py) | ROS入出力、共有操作権の取得・更新・解放、鮮度・世代確認 |
+| [`controller.py`](debris_orbit/controller.py) | ROS入出力、KSP側制御ONの確認、鮮度・世代確認 |
 | [`runner.py`](debris_orbit/runner.py) | ローカルYAML読込み、Topic接続、3ノードの起動・終了 |
 
 通常は3ノードを1つのPythonプロセス内で動かします。
@@ -91,20 +92,19 @@ python3 pylon_demo_debris_orbit/run.py --node controller --instance orbit_a
 
 ## 更新後のAPIと停止動作
 
-操作権は`STATE_PLAYER` / `STATE_PYLON`の共有状態を見ます。
-他ノードのcontroller/lease IDが観測されても、IDの一致を所有条件にしません。
-指令のcontroller/lease ID・sequenceは省略し、bridgeの補完に任せます。
-`vessel_id`だけは古い機体への指令を拒否するガードとして添えます。
+KSPのFlight画面でツールバーの`ROS`ボタンを押し、`ROS2 control ON`を選んでから開始します。
+デモは権限の取得・更新・解放Topicを送信しません。`authority/state`はKSP側のON/OFFと緊急停止の読み取りにのみ使用します。
+`waiting_for_ros2_control_on`ならKSP側のスイッチを確認してください。
+指令のcontroller/lease ID・sequenceは省略してbridgeに任せ、`vessel_id`で古い機体への指令を防ぎます。
 観測の`vessel_id`・`generation`をlifecycleと照合し、同じ機体への再接続も別セッションとして扱います。
 
 Wrenchは`base_link`（+X前、+Y左、+Z上）の力[N]とトルク[N·m]です。
-姿勢上限、指令ramp、連続噴射limit時のゼロ指令cooldownは共通制御器と同じ計算を引き継いでいます。
-無効状態では操作権を取得せず、別ノードの操作権も解放しません。
-実行中の機体切替・操作権喪失・入力欠測は停止を保持し、通信復帰だけでは再開しません。
+無効状態では指令を送りません。実行中の機体切替・制御OFF・入力欠測は停止を保持し、通信復帰だけでは再開しません。
 再開は3ノード全体を再起動してください。0.5秒を超えるIMU欠落も再起動が必要です。
+Ctrl-C / SIGTERMでは送信中のWrenchをゼロにして終了します。KSP側の制御ONは維持されるため、手動操作へ戻る際は`ROS2 control OFF`を選びます。
 
-Ctrl-C / SIGTERMではゼロWrenchを送り、操作権を解放してからROSを終了します。
-共有操作権なので、このデモが取得した操作権の解放はPyLoN全体をプレイヤーへ戻します。
+既定の角速度は6 deg/s（約60秒/周）、半径15 mでの目標相対速度は約1.57 m/sです。
+`--angular-speed-deg-s 1`で従来の速度へ変更できます。姿勢上限10 deg/s、デタンブル開始12 deg/sで周回中の指向を許容します。
 
 ## 状態・撮影結果
 
@@ -120,6 +120,7 @@ ros2 topic echo /ksp_vessel/demos/debris_orbit/orbit_a/controller_status
 
 保存先は実行時のディレクトリから`pylon_demo_debris_orbit_captures/<instance>/<起動日時>/`です。
 0、36、…、324、360、396…度で保存し、PNGのJSONに画像時刻・要求角・推定角を記録します。
+画像を短く保持して航法更新との到着順の差を吸収し、要求角の前後±2度で保存します。
 遅延した画像を現在の角度として保存せず、許容角を外れた場合は`capture_missed`を報告します。
 
 ## 検証
@@ -132,12 +133,17 @@ PYTHONPATH="pylon_demo_debris_orbit:$PYTHONPATH" \
   /usr/bin/python3 -m unittest discover -s pylon_demo_debris_orbit/test -v
 ```
 
-推定・指向・制御式、撮影時刻と2周目、現行APIの共有操作権・世代確認・停止保持を検証します。
+推定・指向・制御式、撮影時刻と2周目、現行APIのKSP制御ON・世代確認・停止保持を検証します。
 KSPへの接続や実飛行はこの自動テストに含みません。
 
-2026-10-06にLinux版KSP 1.12.5・ROS 2 Jazzy・現行PyLoNで実飛行も確認しました。
+2026-10-06の更新後はKSPの`ROS2 control ON`で権限操作Topicを送らずに実飛行を確認しました。
+半径15 m・目標6 deg/sで一周は約64秒、三周目まで28枚を保存し、二・三周目は各10枚が揃いました。
+最大撮影角誤差は1.99度です。初周にはカメラ受信間隔による2地点の欠番があり、長時間の無中断運転は未確認です。
+別試験で約1秒の入力受信空白による停止保持、KSPのOFF→ONでも自動再開しない動作を確認しました。
+
+従来の1 deg/s設定では、2026-10-06にLinux版KSP 1.12.5・ROS 2 Jazzy・現行PyLoNで実飛行も確認しました。
 既存の分離済み軌道上セーブの検証用コピーを使用し、機体の保存時刻にシミュレーション時刻を合わせています。
-`front_lidar` / `front_camera`を使い、半径15 m・角速度1 deg/sの既定設定で推定角508度まで進み、
+`front_lidar` / `front_camera`を使い、半径15 m・当時の角速度1 deg/s設定で推定角508度まで進み、
 36度間隔で15枚を保存しました。撮影角度の最大誤差は0.82度、推定距離は14.45〜15.71 mでした。
 制御中のKSPセーブから独立に読み取った相対位置でも、一周を確認しました。
 約9分後に約1秒のIMU等の受信空白が発生し、0.5秒の欠測ガードで停止・制御権返却しました。
