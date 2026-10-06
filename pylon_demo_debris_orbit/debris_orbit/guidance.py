@@ -26,7 +26,6 @@ from .core import (
     Vector3,
     add,
     clamp_norm,
-    body_orientation_for_sensor_direction,
     detumble_required,
     dot,
     cross,
@@ -38,12 +37,13 @@ from .core import (
     quaternion_error_vector,
     rotate_vector,
     safe_filename_component,
-    search_direction,
     scale,
     subtract,
     unwrap_angle,
     vessel_topics,
 )
+
+from .attitude import target_attitude, target_angular_velocity, search_direction
 
 
 class DebrisOrbitNode(Node):
@@ -146,6 +146,7 @@ class DebrisOrbitNode(Node):
         self.run_started = False
         self.halt_reason = ""
         self.lifecycle_key = None
+        self.lifecycle_epoch = None
         self.target_id = ""
         self.search_started: Optional[Time] = None
         self.search_reference_direction: Optional[Vector3] = None
@@ -276,8 +277,9 @@ class DebrisOrbitNode(Node):
 
     def receive_lifecycle(self, message: VesselLifecycle) -> None:
         key = (message.vessel_id, message.origin_sequence)
+        epoch = (message.vessel_id, message.generation, message.origin_sequence)
         active = message.state in (VesselLifecycle.STATE_ACTIVE, VesselLifecycle.STATE_CHANGED)
-        if not active or key != self.lifecycle_key:
+        if not active or epoch != self.lifecycle_epoch:
             if self.run_started:
                 self.halt_reason = "session_changed"
             self._reset_target_tracking()
@@ -289,6 +291,7 @@ class DebrisOrbitNode(Node):
             self.complete = False
             self.saved_captures = 0
         self.lifecycle_key = key if active else None
+        self.lifecycle_epoch = epoch if active else None
 
     def receive_target(self, message: RelativeTarget) -> None:
         if (message.header.frame_id != self.world_frame
@@ -493,7 +496,7 @@ class DebrisOrbitNode(Node):
         # position step otherwise holds RCS at maximum until too late to brake.
         desired_position = add(position, clamp_norm(position_error, self.max_position_step))
         current_q = self._pose_quaternion()
-        desired_q = body_orientation_for_sensor_direction(
+        desired_q = target_attitude(
             current_q, self.lidar_mount_rotation, self._sensor_direction(target)
         )
         attitude_error = quaternion_error_vector(desired_q, current_q)
@@ -504,8 +507,7 @@ class DebrisOrbitNode(Node):
             desired_velocity = target_world_velocity
         direction = self._sensor_direction(target)
         mount_velocity = cross(self._twist_angular(), rotate_vector(current_q, self.lidar_mount_translation))
-        line_of_sight_rate = scale(cross(direction, subtract(self.target_velocity, mount_velocity)),
-                                   1.0 / max(dot(direction, direction), 0.01))
+        line_of_sight_rate = target_angular_velocity(direction, self.target_velocity, mount_velocity)
         self._publish_setpoint(
             now,
             ControlSetpoint.MODE_SIX_DOF,
@@ -549,7 +551,7 @@ class DebrisOrbitNode(Node):
 
     def _publish_target_attitude_setpoint(self, now: Time, target: Vector3) -> None:
         direction = self._sensor_direction(target)
-        desired_q = body_orientation_for_sensor_direction(
+        desired_q = target_attitude(
             self._pose_quaternion(), self.lidar_mount_rotation, direction
         )
         self._publish_setpoint(
@@ -595,7 +597,7 @@ class DebrisOrbitNode(Node):
             0.0 if elapsed < self.search_start_delay else self.search_yaw_amplitude,
             0.0 if elapsed < self.search_start_delay else self.search_pitch_amplitude,
         )
-        desired_q = body_orientation_for_sensor_direction(
+        desired_q = target_attitude(
             self._pose_quaternion(), self.lidar_mount_rotation, direction
         )
         self._publish_setpoint(

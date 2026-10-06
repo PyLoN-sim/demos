@@ -21,6 +21,6 @@ VABの機体読み込みから **PyLoN Debris Orbiter** を選び、クルーを
 
 軌道上でエンジンを停止し、デカプラーの右クリックメニューから対象を分離します。保存済みのステージ設定は変更していないため、分離にSpaceキーを使わずデカプラーを直接操作してください。センサーを積んだ機体を操作対象にし、太陽電池とRCSを有効にして相対運動を小さくします。続きは[デモガイド](https://github.com/PyLoN-sim/docs/blob/main/demos/debris-orbit.md)を参照してください。
 
-ROS 2パッケージをビルドした場合は、`$(ros2 pkg prefix pylon_demo_debris_orbit)/share/pylon_demo_debris_orbit/craft/`にも配置されます。
+このデモはPythonソースから直接起動します。機体ファイルは、このリポジトリの`craft/`からコピーしてください。
 
 元機体での周回・撮影記録はありますが、現行PyLoN名へ変換した同梱ファイルのKSP再読み込み・再飛行は未確認です。

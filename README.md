@@ -5,7 +5,7 @@
 
 | デモ | 内容 | bridge |
 |---|---|---|
-| [debris_orbit](pylon_demo_debris_orbit/) | LiDAR・IMUによるデブリ周回と撮影 | 別途起動 |
+| [debris_orbit](pylon_demo_debris_orbit/) | LiDAR・IMUによるデブリ周回と撮影（Python直接起動） | 別途起動 |
 | [lidar_slam](pylon_demo_lidar_slam/) | 2D SLAMとNav2 | 別途起動 |
 | [mun_rover](pylon_demo_mun_rover/) | 月面ローバーのNav2走行 | launchが起動 |
 | [position_estimator](pylon_demo_position_estimator/) | 3D LiDARによる6DoF推定 | 別途起動 |
@@ -28,7 +28,9 @@ rosdep install --from-paths ../PyLoN/Ros2 . --ignore-src --rosdistro jazzy -y
 ./pylon_demo_lidar_slam/run.sh scan_topic:=/ksp_vessel/lidar_2d/front_lidar/scan
 ```
 
-本体が別の場所にある場合は`PYLON_DIR=/path/to/PyLoN`、ROS環境やワークスペースは`ROS_SETUP`・`ROS2_WS`で指定できます。`build.sh`は本体のROSパッケージと選択したデモを同期・ビルドします。KSPのMODは本体の`sync.sh`で導入します。
+本体が別の場所にある場合は`PYLON_DIR=/path/to/PyLoN`、ROS環境やワークスペースは`ROS_SETUP`・`ROS2_WS`で指定できます。`build.sh`は本体のROSパッケージと選択したデモを同期し、amentパッケージをビルドします。KSPのMODは本体の`sync.sh`で導入します。
+
+`pylon_demo_debris_orbit`はデモ自身のビルドが不要です。依存する本体のROSパッケージは`./pylon_demo_debris_orbit/build.sh`で準備できます。本体のbridge・メッセージ型を用意したROS環境で、`python3 pylon_demo_debris_orbit/run.py`から直接起動します。[専用README](pylon_demo_debris_orbit/README.md)に認識・目標姿勢・目標推力のモジュール構成と起動手順を記載しています。
 
 bridgeを別途起動するデモでは、別ターミナルでROS環境をsourceし、`ros2 run pylon_bridge udp_bridge --host 127.0.0.1`を実行します。デブリ周回では`--disable-ground-truth`を追加します。同じKSPへ接続するbridgeは1つだけにしてください。機体準備・制御の開始条件・停止手順は各READMEと[デモガイド](https://github.com/PyLoN-sim/docs/blob/main/demos/index.md)を参照してください。
 
@@ -45,7 +47,7 @@ LinuxのDockerと、本体のcloneが必要です。まず本体イメージを�
 ./pylon_demo_reusable/spaceros.sh exec ros2 lifecycle set /reusable_mission activate
 ```
 
-`pylon_demo_reusable/Dockerfile`がコンテナ定義です。他の4デモは上記のホストROS 2向けスクリプトを使用します。
+`pylon_demo_reusable/Dockerfile`がコンテナ定義です。他のament版3デモは上記のホストROS 2向けスクリプトを使用します。
 
 ## 貢献
 

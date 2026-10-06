@@ -1,106 +1,147 @@
-# pylon_demo_debris_orbit: LiDAR＋IMU周回デモ
+# デブリ周回デモ（Python直接実行版）
 
-## 共通の実行入口
+従来のament_python版を、Pythonから直接起動する構成へ置き換えました。
+このデモには`package.xml`、`setup.py`、amentのlaunchファイルはありません。
+ソースから`python3 run.py`でROS 2ノードを起動します。デモ自身のcolconビルドやpip installは不要です。
+ROS 2 Jazzy、現在の`pylon_interfaces`、起動済みのPyLoN bridgeは必要です。
+`pylon_vehicle_control`や既存デモのインストールは不要です。
 
-demosリポジトリのルートで実行します。依存パッケージの導入は[共通準備](../README.md)を参照してください。
+元のLiDAR＋6軸IMU推定、後方を含む探索、デタンブル、半径15 mへの接近、RCS周回、
+36度ごとのPNG＋計測JSON保存を引き継いでいます。既定では2周目以降も撮影を続けます。
+Ground Truthは認識・誘導・制御のいずれも購読しません。
+初期IMU姿勢に固定した座標系、自由落下中の無推力対象という仮定も同じです。
 
-```bash
-./pylon_demo_debris_orbit/build.sh
-./pylon_demo_debris_orbit/run.sh  # launch引数を後ろに追加できます
-```
+## 準備と起動
 
-機体の準備から停止までの手順は、[デモガイド](https://github.com/PyLoN-sim/docs/blob/main/demos/debris-orbit.md)を参照してください。
+機体は元デモの[`PyLoN Debris Orbiter.craft`](craft/)を使います。
+[機体のコピー・読み込み手順](craft/README.md)と[軌道配置・分離・開始条件のガイド](https://github.com/PyLoN-sim/docs/blob/main/demos/debris-orbit.md)を確認してください。
+機体センサーIDは`front_lidar`、`orbit_camera`です。
 
-3D LiDARと6軸IMUだけでデブリへの相対位置・相対速度・姿勢変化を推定し、LiDARを向けながらRCSで周回します。**推定器・誘導器・制御器のすべてでGround Truthを購読しません。** 機体カメラで36度ごとに撮影し、次の周回も撮影を続けます。
-
-```text
-3D点群 ─ SciPyクラスタリング ─┐
-                              ├─ 相対運動Kalman filter ─ RelativeTarget ─ 周回誘導
-IMU ─ ジャイロ積分・比力予測 ─┘               │                         │
-                                         推定Pose/Twist ─ 共通制御器 ─ RCS
-                                                                    │
-                                   機体カメラ ─ 36度ごとにPNG＋計測JSON
-```
-
-`pylon_debris_target_estimator`が推定、`pylon_demo_debris_orbit`が周回誘導・撮影、`pylon_vehicle_control`がlease付きのBody Wrenchを担当します。制御器の入力には、このデモの推定Pose/Twistを明示的に接続します。旧`target_source:=truth`/`lidar`は廃止し、`lidar_imu`が唯一の入力方式です。
-
-## 実機の準備と起動
-
-使用済みのデモ機体を[`craft/PyLoN Debris Orbiter.craft`](craft/PyLoN%20Debris%20Orbiter.craft)に同梱しています。[コピー・読み込み手順](craft/README.md)に従い、セーブの`Ships/VAB/`へコピーしてVABで **PyLoN Debris Orbiter** を開いてください。RCS、3D LiDAR（`front_lidar`）、同方向を向くカメラ（`orbit_camera`）、分離するタンク・エンジンを搭載済みです。センサー取付位置・姿勢は機体内のTFから取得します。
-
-[起動手順](https://github.com/PyLoN-sim/docs/blob/main/guide/getting-started.md)に従ってビルド・同期し、KSPの通常操作で機体を開いてください。
-
-Flightが開いたら別ターミナルでbridgeを起動します。`--disable-ground-truth`は真値パケットを破棄し、真値Topicとworld TFを配信しません。機体ID・lifecycleもIMUパケットから取得します。
+NumPy、SciPy、PyYAMLとROSの標準メッセージ・TF・点群ライブラリを用意します。
 
 ```bash
+sudo apt install python3-numpy python3-scipy python3-yaml \
+  ros-jazzy-sensor-msgs-py ros-jazzy-tf2-ros-py ros-jazzy-nav-msgs \
+  ros-jazzy-visualization-msgs
 source /opt/ros/jazzy/setup.bash
 source ~/ros2_ws/install/setup.bash
+```
+
+本体のROSパッケージを準備するには、demosルートで`./pylon_demo_debris_orbit/build.sh`を実行します。
+このスクリプトは本体のinterfaces・bridge・vehicle_controlを同期・ビルドし、デモのPythonソースも同期します。
+デモ自身はcolconの対象になりません。
+
+APIを更新した後は本体側で`pylon_interfaces`とbridgeを再ビルド・sourceしてください。
+古い`ControlAuthorityState`（`generation`がない型）のままなら、起動時に説明を表示して終了します。
+
+ターミナルAで、通常のbridgeを1つ起動します。
+
+```bash
 ros2 run pylon_bridge udp_bridge \
   --host 127.0.0.1 --port 49010 --disable-ground-truth
 ```
 
-同梱機体は軌道上の試験用です。KSP標準のデバッグメニューで高度約100 kmのKerbin円軌道へ配置するか、別途打ち上げ手段を用意します。エンジン停止後、デカプラーの右クリックメニューで対象を分離してください。機体の状態が安定したら別ターミナルでデモを起動します。
+ターミナルBもROSと本体ワークスペースをsourceしてから、demosルートで実行します。
+初めは推定と表示だけで点群・相対位置・相対速度を確認します。
 
 ```bash
-source /opt/ros/jazzy/setup.bash
-source ~/ros2_ws/install/setup.bash
-ros2 launch pylon_demo_debris_orbit pylon_demo_debris_orbit.launch.py \
-  enabled:=true demo_instance_id:=test_a_imu rviz:=true
+python3 pylon_demo_debris_orbit/run.py --no-enabled --no-controller --instance orbit_a --rviz
 ```
 
-未発見時はIMUで姿勢を追跡しつつ後方まで探索します。点群から3回続けて対象を取得したら指向・接近を開始し、半径15 mへ到達後に周回します。大きな姿勢誤差がある間は相対速度を制動します。`Ctrl-C`で制御指令をゼロにしてleaseを解放します。
-
-推定だけを表示するには`controller_enabled:=false`を指定し、`enabled:=true`を付けずに起動します。独自推定器をつなぐ場合は`estimator_enabled:=false`とし、同じtarget・navigation Topicを配信します。
-
-## 座標系と推定の範囲
-
-IMUには絶対姿勢がありません。初回の機体姿勢を単位quaternionとし、SciPyのRotationでbody角速度を積分します。`pylon_debris_inertial_<demo_instance_id>`の軸はこの初期姿勢に固定され、ENUや惑星の絶対座標とは一致しません。
-
-LiDARの観測面の包囲箱中心を、取付TFとIMU姿勢でこの座標系へ変換します。NumPyで間引き、[SciPy cKDTree](https://docs.scipy.org/doc/scipy/reference/generated/scipy.spatial.cKDTree.html)と疎行列の連結成分でクラスタを抽出します。比力を積分してスキャン間の相対運動を予測し、点群観測で位置・速度を補正します。
-
-近距離で共に自由落下する、推力を出していない対象を仮定します。自機の比力は対象−自機の相対加速度に負符号で入り、共通の重力加速度を足す必要はありません。重力勾配や対象自身の加速度はモデル誤差として残ります。地上用の重力方向推定を自由落下中へ流用していません。
-
-制御用の原点は推定した対象中心です。自機位置は`−relative_position`、自機速度は`−relative_velocity`です。絶対位置・絶対速度・絶対方位は求めません。見える表面の中心と実際の重心には偏差があり、6軸IMUのジャイロバイアスによる長時間の方位ドリフトも完全には観測できません。現在のModはIMUに人工ノイズ・バイアスを加えていません。
-
-0.5秒を超えるIMUサンプルの欠落では`imu_restart_required`となり、古い状態での制御を止めます。この場合はlaunch全体を再起動して基準座標系を揃えます。機体切替・lifecycle更新でも推定をリセットします。
-
-## 36度ごとの撮影
-
-周回開始位置を0度として、**0、36、72、…、324、360、396、…度**で搭載カメラの画像を保存します。`stop_after_capture: false`が既定なので2周目以降も続きます。
-
-保存先は`pylon_demo_debris_orbit_captures/<demo_instance_id>/<起動日時>/`です。画像名に角度と連番を付けるため、次周の同じ角度や再起動で上書きしません。PNGごとのJSONに、画像timestamp・カメラframe・指定角度・画像取得時点の推定周回角を記録します。
-
-画像timestampを推定角の履歴へ照合し、指定角度を通過した後、既定2度以内のフレームを保存します。カメラ遅延や未配信で間に合わない場合は`capture_missed`を報告し、古い画像で埋めません。カメラのフレーム周期による角度誤差はJSONで確認できます。
-
-## RVizと設定
-
-`rviz:=true`で点群、選択クラスタ、対象中心、自機、視線、目標半径と軌跡を表示します。表示用の`pylon_debris_view_<demo_instance_id>`は推定対象中心が原点です。軌跡は2 Hzで最大30分保持します。
-
-設定は[`config/pylon_demo_debris_orbit.yaml`](config/pylon_demo_debris_orbit.yaml)。主なlaunch引数は`orbit_radius`、`demo_instance_id`、`lidar_sensor_id`、`camera_sensor_id`、`lidar_frame`、`config_file`です。YAMLには`imu_topic`、`imu_max_gap_sec`、点群フィルタと追跡雑音、RCSゲイン、撮影間隔・許容角があります。
-
-Topicルートは`/ksp_vessel/demos/debris_orbit/<demo_instance_id>`:
-
-| Topic末尾 | 内容 |
-|---|---|
-| `target` | `RelativeTarget`: 対象−自機の相対位置・速度、初期IMU姿勢に固定した軸 |
-| `navigation/pose` | 対象基準の自機位置とIMU姿勢 |
-| `navigation/twist` | 同座標系での自機相対速度と角速度 |
-| `navigation/twist_body` | body軸での推定速度とIMU角速度 |
-| `setpoint` | 共通制御器への位置・姿勢・速度目標 |
-| `status`, `estimator_status`, `controller_status` | JSON状態 |
-| `points`, `target_points`, `markers`, `path` | RViz表示 |
-
-センサー時刻はKSP universal timeに一定offsetを加えた連続時刻です。遅れた画像やゲームの処理速度に合わせて飛行中にoffsetを飛ばすことはありません。nodeの受信鮮度判定には別途ROS時計を使います。
-
-## テスト
+確認用プロセスをCtrl-Cで終了し、機体を安定させてから制御を開始します。
 
 ```bash
-source /opt/ros/jazzy/setup.bash
-source ~/ros2_ws/install/setup.bash
-PYTHONPATH="pylon_demo_debris_orbit:../PyLoN/Ros2/pylon_vehicle_control:../PyLoN/Ros2/pylon_bridge:$PYTHONPATH" \
+python3 pylon_demo_debris_orbit/run.py --enabled --instance orbit_a --orbit-radius 15 --rviz
+```
+
+`./pylon_demo_debris_orbit/run.sh`も同じ入口です。`--help`で全引数を確認できます。
+設定は[`config/pylon_demo_debris_orbit.yaml`](config/pylon_demo_debris_orbit.yaml)。元デモと同じ3つのROS parameterセクションを持ちます。
+`--config /path/to/custom.yaml`で別の設定を使えます。`--no-enabled`はYAMLが有効でも制御を無効にします。
+`--lidar-sensor-id`、`--camera-sensor-id`、`--prefix`、`--output-directory`も変更できます。
+`--ros-args`以降はrclpyへ渡します。
+
+制御デモは、同じ機体に対して同時に動かさないでください。
+`--instance`は出力namespaceと撮影保存先の識別名で、機体の選択には使いません。
+操作対象は常にKSPのactive_vesselです。
+
+## モジュール構成
+
+| モジュール | 責務 |
+|---|---|
+| [`recognition.py`](debris_orbit/recognition.py) | 認識ノード。位置・速度・姿勢を推定してtarget/navigationを配信 |
+| [`lidar_pipeline.py`](debris_orbit/lidar_pipeline.py) | 点群とIMUの時刻照合、取付TF変換、推定Pose/Twist生成 |
+| [`inertial.py`](debris_orbit/inertial.py)、[`perception.py`](debris_orbit/perception.py) | ジャイロ・比力の積分、SciPyクラスタ抽出、相対運動Kalman filter |
+| [`attitude.py`](debris_orbit/attitude.py) | LiDARの取付姿勢を考慮した目標姿勢、姿勢／角速度loop、デタンブルトルク |
+| [`thrust.py`](debris_orbit/thrust.py) | 位置・速度誤差から目標推力を計算し、body軸のWrenchへ組み立て |
+| [`guidance.py`](debris_orbit/guidance.py) | 探索→接近→周回の進行、軌道上の位置・速度目標、撮影 |
+| [`controller.py`](debris_orbit/controller.py)、[`authority.py`](debris_orbit/authority.py) | ROS入出力、共有操作権の取得・更新・解放、鮮度・世代確認 |
+| [`runner.py`](debris_orbit/runner.py) | ローカルYAML読込み、Topic接続、3ノードの起動・終了 |
+
+通常は3ノードを1つのPythonプロセス内で動かします。
+別プロセスで実行したい場合は、各ターミナルで同じ設定・instanceを使います。
+
+```bash
+python3 pylon_demo_debris_orbit/run.py --node recognition --instance orbit_a
+python3 pylon_demo_debris_orbit/run.py --node guidance --enabled --instance orbit_a
+python3 pylon_demo_debris_orbit/run.py --node controller --instance orbit_a
+```
+
+`attitude.py`と`thrust.py`の計算部分はROSをimportしないため、Pythonから直接呼び出せます。
+周回用の並進目標は`guidance.py`、力[N]への変換は`thrust.py`です。
+
+## 更新後のAPIと停止動作
+
+操作権は`STATE_PLAYER` / `STATE_PYLON`の共有状態を見ます。
+他ノードのcontroller/lease IDが観測されても、IDの一致を所有条件にしません。
+指令のcontroller/lease ID・sequenceは省略し、bridgeの補完に任せます。
+`vessel_id`だけは古い機体への指令を拒否するガードとして添えます。
+観測の`vessel_id`・`generation`をlifecycleと照合し、同じ機体への再接続も別セッションとして扱います。
+
+Wrenchは`base_link`（+X前、+Y左、+Z上）の力[N]とトルク[N·m]です。
+姿勢上限、指令ramp、連続噴射limit時のゼロ指令cooldownは共通制御器と同じ計算を引き継いでいます。
+無効状態では操作権を取得せず、別ノードの操作権も解放しません。
+実行中の機体切替・操作権喪失・入力欠測は停止を保持し、通信復帰だけでは再開しません。
+再開は3ノード全体を再起動してください。0.5秒を超えるIMU欠落も再起動が必要です。
+
+Ctrl-C / SIGTERMではゼロWrenchを送り、操作権を解放してからROSを終了します。
+共有操作権なので、このデモが取得した操作権の解放はPyLoN全体をプレイヤーへ戻します。
+
+## 状態・撮影結果
+
+Topicは元デモと同じ`/ksp_vessel/demos/debris_orbit/<instance>/`です。
+`target`、`navigation/pose`、`navigation/twist`、`navigation/twist_body`、`setpoint`、
+`status`、`estimator_status`、`controller_status`、RViz表示を配信します。
+
+```bash
+ros2 topic echo /ksp_vessel/demos/debris_orbit/orbit_a/status
+ros2 topic echo /ksp_vessel/demos/debris_orbit/orbit_a/estimator_status
+ros2 topic echo /ksp_vessel/demos/debris_orbit/orbit_a/controller_status
+```
+
+保存先は実行時のディレクトリから`pylon_demo_debris_orbit_captures/<instance>/<起動日時>/`です。
+0、36、…、324、360、396…度で保存し、PNGのJSONに画像時刻・要求角・推定角を記録します。
+遅延した画像を現在の角度として保存せず、許容角を外れた場合は`capture_missed`を報告します。
+
+## 検証
+
+demosルートで、現行のインターフェースをsourceして実行します。
+ROSテストは独立したdomain 173〜175を使用します。
+
+```bash
+PYTHONPATH="pylon_demo_debris_orbit:$PYTHONPATH" \
   /usr/bin/python3 -m unittest discover -s pylon_demo_debris_orbit/test -v
 ```
 
-ROS結合テストは独立したdomainで動作し、試験中のKSPへ指令を送りません。
+推定・指向・制御式、撮影時刻と2周目、現行APIの共有操作権・世代確認・停止保持を検証します。
+KSPへの接続や実飛行はこの自動テストに含みません。
 
-一度動作を開始した後にセッション変更・姿勢や速度の欠測・制御権喪失が起きると停止を保持します。通信復帰で周回目標を再開せず、再開にはデモを起動し直してください。
+2026-10-06にLinux版KSP 1.12.5・ROS 2 Jazzy・現行PyLoNで実飛行も確認しました。
+既存の分離済み軌道上セーブの検証用コピーを使用し、機体の保存時刻にシミュレーション時刻を合わせています。
+`front_lidar` / `front_camera`を使い、半径15 m・角速度1 deg/sの既定設定で推定角508度まで進み、
+36度間隔で15枚を保存しました。撮影角度の最大誤差は0.82度、推定距離は14.45〜15.71 mでした。
+制御中のKSPセーブから独立に読み取った相対位置でも、一周を確認しました。
+約9分後に約1秒のIMU等の受信空白が発生し、0.5秒の欠測ガードで停止・制御権返却しました。
+長時間の無中断運転と、同梱craftの新規打上げ・分離直後の起動は、この検証では確認していません。
+
+元デモと共通制御器の処理を、この版のソースへ引き継いでいます。今後それらを変更した場合は、
+この版の対応モジュールと設定にも変更を反映してください。ライセンスはdemosの[MIT License](../LICENSE)です。

@@ -1,12 +1,9 @@
 import math
 import unittest
 
-from pylon_vehicle_control.domain.control_law import (
-    body_detumble_torque,
-    body_wrench_for_setpoint,
-    rate_guard_body_torque,
-)
-from pylon_demo_debris_orbit.core import look_at_quaternion, predict_linear_at
+from debris_orbit.thrust import body_wrench_for_setpoint
+from debris_orbit.attitude import body_detumble_torque, rate_guard_body_torque
+from debris_orbit.core import look_at_quaternion, predict_linear_at
 
 
 class ControlTests(unittest.TestCase):

@@ -1,7 +1,7 @@
 import math
 import unittest
 
-from pylon_demo_debris_orbit.core import (
+from debris_orbit.core import (
     body_orientation_for_sensor_look_at,
     body_orientation_for_sensor_direction,
     detumble_required,

@@ -3,9 +3,9 @@ import unittest
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from pylon_demo_debris_orbit.inertial import ImuIntegrator
-from pylon_demo_debris_orbit.perception import RelativeTracker
-from pylon_demo_debris_orbit.core import search_direction
+from debris_orbit.inertial import ImuIntegrator
+from debris_orbit.perception import RelativeTracker
+from debris_orbit.core import search_direction
 
 
 class InertialTests(unittest.TestCase):

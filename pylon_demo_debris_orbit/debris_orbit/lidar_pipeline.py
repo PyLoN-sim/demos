@@ -47,6 +47,7 @@ class LidarPipeline:
         self.timer = node.create_timer(.02, self.process)
 
     def reset(self):
+        self.buffer.clear()
         self.imu.reset()
         self.tracker.reset()
         self.clouds.clear()

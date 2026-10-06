@@ -1,6 +1,6 @@
 import unittest
 import numpy as np
-from pylon_demo_debris_orbit.perception import extract_clusters, RelativeTracker
+from debris_orbit.perception import extract_clusters, RelativeTracker
 
 
 class PerceptionTests(unittest.TestCase):

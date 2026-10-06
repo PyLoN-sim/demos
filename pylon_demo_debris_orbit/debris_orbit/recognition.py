@@ -58,6 +58,7 @@ class TargetEstimator(Node):
         self.view = TargetView(self)
         self.pipeline = None
         self.key = None
+        self.epoch_key = None
         self.selected_id = 'lidar_cluster'
         self.observations = 0
         self.last_stamp = None
@@ -73,11 +74,13 @@ class TargetEstimator(Node):
     def receive_lifecycle(self, message):
         active = message.state in (VesselLifecycle.STATE_ACTIVE, VesselLifecycle.STATE_CHANGED)
         key = (message.vessel_id, message.origin_sequence) if active else None
-        if self.key != key:
+        epoch_key = (message.vessel_id, message.generation, message.origin_sequence) if active else None
+        if self.epoch_key != epoch_key:
             self.selected_id = 'lidar_cluster'
             self.observations = 0
             self.last_stamp = None
             self.key = key
+            self.epoch_key = epoch_key
             self.view.reset()
             if self.pipeline is not None:
                 self.pipeline.reset()

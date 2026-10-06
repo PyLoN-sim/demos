@@ -85,8 +85,7 @@ pylon_debris_target_estimator:
 
 pylon_demo_debris_orbit_controller:
   ros__parameters:
-    # 共通制御パッケージ。lifecycleのvessel_idへleaseを取得してから指令する。
-    controller_id: pylon_demo_debris_orbit_demo
+    # Python推力制御モジュール。active_vesselの共有PyLoN操作権を取得してから指令する。
     extrapolate_setpoint: true
     vessel_topic_prefix: /ksp_vessel
     pose_topic: ""
@@ -100,8 +99,8 @@ pylon_demo_debris_orbit_controller:
     world_frame: pylon_debris_inertial
     body_frame: base_link
 
-    control_priority: 100
     lease_duration_sec: 2.0
+    authority_timeout_sec: 1.0
     lease_renew_period_sec: 0.5
     suppress_sas: true
     command_timeout_sec: 0.25

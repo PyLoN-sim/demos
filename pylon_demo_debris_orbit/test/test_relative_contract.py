@@ -17,8 +17,8 @@ try:
     from sensor_msgs.msg import Imu, Image
     from sensor_msgs_py.point_cloud2 import create_cloud_xyz32
     from pylon_interfaces.msg import RelativeTarget, VesselLifecycle, ControlSetpoint
-    from pylon_demo_debris_orbit.node import DebrisOrbitNode
-    from pylon_demo_debris_orbit.target_node import TargetEstimator
+    from debris_orbit.guidance import DebrisOrbitNode
+    from debris_orbit.recognition import TargetEstimator
 except ImportError:
     rclpy = None
 
